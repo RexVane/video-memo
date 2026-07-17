@@ -1,0 +1,9 @@
+{
+  "id": "video-summarizer",
+  "name": "Video Summarizer",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Generate structured notes from video links and local media with the Video Summarizer Python engine.",
+  "author": "Video Summarizer",
+  "isDesktopOnly": true
+}

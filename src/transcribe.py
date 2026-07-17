@@ -1,0 +1,184 @@
+"""Speech-to-text with faster-whisper (local)."""
+
+from __future__ import annotations
+
+import ctypes
+import gc
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Callable
+
+StatusCb = Callable[[str], None]
+ProgressCb = Callable[[float], None]
+
+
+@dataclass
+class TranscriptSegment:
+    start: float
+    end: float
+    text: str
+
+
+@dataclass
+class Transcript:
+    language: str | None
+    text: str
+    segments: list[TranscriptSegment]
+
+
+def _fmt_ts(seconds: float) -> str:
+    s = max(0, int(seconds))
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h:02d}:{m:02d}:{sec:02d}"
+    return f"{m:02d}:{sec:02d}"
+
+
+def _cuda_runtime_status() -> tuple[bool, str | None]:
+    try:
+        import ctranslate2
+    except ImportError:
+        return False, "未安装 CTranslate2"
+
+    if ctranslate2.get_cuda_device_count() < 1:
+        return False, "未检测到 CUDA 设备"
+
+    if sys.platform == "win32":
+        missing: list[str] = []
+        for library in ("cublas64_12.dll", "cublasLt64_12.dll"):
+            try:
+                ctypes.WinDLL(library)
+            except OSError:
+                missing.append(library)
+        if missing:
+            return False, f"缺少 {', '.join(missing)}"
+    return True, None
+
+
+def _is_cuda_runtime_error(error: Exception) -> bool:
+    messages: list[str] = []
+    current: BaseException | None = error
+    while current is not None and len(messages) < 4:
+        messages.append(str(current).lower())
+        current = current.__cause__ or current.__context__
+    combined = "\n".join(messages)
+    return any(
+        marker in combined
+        for marker in (
+            "cuda",
+            "cublas",
+            "cudnn",
+            "nvcuda",
+            "out of memory",
+        )
+    )
+
+
+def _transcribe_once(
+    model_factory,
+    audio_path: Path,
+    model_size: str,
+    language: str | None,
+    device: str,
+    compute_type: str,
+    on_progress: ProgressCb | None = None,
+) -> Transcript:
+    model = model_factory(model_size, device=device, compute_type=compute_type)
+    segments_iter, info = model.transcribe(
+        str(audio_path),
+        language=language,
+        vad_filter=True,
+        beam_size=5,
+    )
+
+    segments: list[TranscriptSegment] = []
+    parts: list[str] = []
+    duration = float(getattr(info, "duration", 0.0) or 0.0)
+    last_percent = -2
+    for seg in segments_iter:
+        if on_progress and duration > 0:
+            percent = min(100, int((seg.end / duration) * 100))
+            if percent >= last_percent + 2:
+                on_progress(percent / 100)
+                last_percent = percent
+        text = (seg.text or "").strip()
+        if not text:
+            continue
+        segments.append(TranscriptSegment(start=seg.start, end=seg.end, text=text))
+        parts.append(f"[{_fmt_ts(seg.start)}] {text}")
+
+    if on_progress:
+        on_progress(1.0)
+
+    return Transcript(
+        language=getattr(info, "language", None),
+        text="\n".join(parts),
+        segments=segments,
+    )
+
+
+def transcribe(
+    audio_path: Path,
+    model_size: str = "base",
+    language: str | None = None,
+    device: str = "auto",
+    on_status: StatusCb | None = None,
+    on_progress: ProgressCb | None = None,
+) -> Transcript:
+    """
+    Transcribe audio.
+    model_size: tiny / base / small / medium / large-v3
+    language: e.g. 'zh', 'en', or None for auto-detect
+    """
+    from faster_whisper import WhisperModel
+
+    if not audio_path.is_file():
+        raise FileNotFoundError(f"音频文件不存在: {audio_path}")
+    if device not in {"auto", "cpu", "cuda"}:
+        raise ValueError("device 必须是 auto、cpu 或 cuda")
+
+    def status(message: str) -> None:
+        if on_status:
+            on_status(message)
+
+    if device == "auto":
+        cuda_ready, reason = _cuda_runtime_status()
+        if cuda_ready:
+            status("检测到完整 CUDA 运行时，使用 GPU float16")
+            try:
+                return _transcribe_once(
+                    WhisperModel,
+                    audio_path,
+                    model_size,
+                    language,
+                    "cuda",
+                    "float16",
+                    on_progress,
+                )
+            except Exception as error:
+                if not _is_cuda_runtime_error(error):
+                    raise
+                status(f"CUDA 转写失败（{error}），自动切换 CPU int8")
+                gc.collect()
+        else:
+            status(f"CUDA 不可用（{reason}），使用 CPU int8")
+        device = "cpu"
+
+    compute_type = "float16" if device == "cuda" else "int8"
+    if device != "cpu":
+        status(f"使用 {device.upper()} {compute_type}")
+    return _transcribe_once(
+        WhisperModel,
+        audio_path,
+        model_size,
+        language,
+        device,
+        compute_type,
+        on_progress,
+    )
+
+
+def save_transcript(transcript: Transcript, path: Path) -> None:
+    path.write_text(transcript.text, encoding="utf-8")
