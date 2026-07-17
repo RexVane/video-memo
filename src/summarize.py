@@ -164,6 +164,21 @@ def _timestamp_bounds(chunk: str) -> tuple[str, str]:
     return timestamps[0], timestamps[-1]
 
 
+def _chapter_callout(note: str) -> str:
+    """Wrap a chapter note in a collapsed Obsidian callout."""
+    lines = note.strip().splitlines()
+    if not lines:
+        return ""
+
+    heading = re.match(r"^###\s+(.+?)\s*$", lines[0])
+    title = heading.group(1) if heading else "章节参考"
+    body = lines[1:] if heading else lines
+    quoted_body = "\n".join(f"> {line}" if line else ">" for line in body)
+    if not quoted_body:
+        return f"> [!note]- {title}"
+    return f"> [!note]- {title}\n>\n{quoted_body}"
+
+
 def _generate_chapter_notes(
     client: OpenAI,
     *,
@@ -183,11 +198,13 @@ def _generate_chapter_notes(
     notes: list[str | None] = [None] * len(chunks)
     notes_model = os.environ.get("LLM_NOTES_MODEL", "").strip() or model
     system = (
-        "你是资深课程讲师，负责把视频逐字稿整理成可以真正学习和复习的章节笔记。"
+        "你是严谨的知识编辑，负责从视频逐字稿中提取可验证的精华知识。"
         "必须覆盖片段中的每一个实质主题、概念、操作步骤、示例、对比、限制和警告，"
-        "不能只写大纲或几条摘要。可以纠正上下文明确的 ASR 同音错误（例如把 Gate 纠正为 Git），"
+        "合并重复表述，删除寒暄、口头禅、广告和无信息量内容。可以纠正上下文明确的 ASR 同音错误"
+        "（例如把 Gate 纠正为 Git），"
         "但不得补充原文没有的事实。保留重要时间戳和命令名。"
     )
+
     def generate_one(index: int, chunk: str) -> tuple[int, str]:
         start, end = _timestamp_bounds(chunk)
         response = _chat_completion(
@@ -202,18 +219,16 @@ def _generate_chapter_notes(
 
 请输出 Markdown，严格使用以下结构：
 ### {start}–{end}｜根据内容拟定章节标题
-#### 本章目标
-说明学完本章应该理解或会做什么。
-#### 详细知识点
-逐项讲清楚“是什么、为什么、怎么做、何时使用”，不要省略转写中的独立知识点。
-#### 操作与示例
-还原讲者给出的流程、界面操作、命令、案例和因果关系。
-#### 注意事项与易错点
-保留所有限制、风险、例外和协作建议。
-#### 本章检查清单
-列出可用于复习的具体问题或动作。
+#### 关键结论
+用 1–3 条具体结论概括本段价值，不写“本章介绍了……”之类空话。
+#### 知识与原理
+按信息重要性解释“是什么、为什么、如何工作、何时使用”，保留必要例子与因果关系。
+#### 操作与案例
+仅在原文确有操作时，还原执行顺序、界面位置、命令意图、结果与判断方法。
+#### 边界与易错点
+仅列原文明确提及的限制、风险、例外和纠正方式。
 
-内容充足时写成 1200–1800 字的学习笔记，不要用一句话带过多个概念。
+详略随本段信息密度，不凑字数，不生成学习目标、练习题、自测题或复习任务。
 
 转写原文：
 {chunk}""",
@@ -263,7 +278,7 @@ def summarize(
     on_progress: SummaryProgressCb | None = None,
 ) -> str:
     """
-    Build comprehensive study notes from transcript and optional key frames.
+    Build scan-first knowledge notes from transcript and optional key frames.
     """
     client = _client(model, api_key=api_key, base_url=base_url)
     frames = frame_paths or []
@@ -287,57 +302,101 @@ def summarize(
     }.get(language, language)
 
     system = (
-        "你是资深课程设计师。请把全部章节笔记整合成一份可以替代观看视频进行学习的教程。"
-        "忠于材料，不编造；不得为了简短而遗漏章节中的实质知识。每个核心概念都解释"
-        "是什么、为什么、怎么做、适用场景、风险和例子。若画面与旁白不一致则分别说明。"
+        "你是资深知识编辑和可视化讲解者。请把全部章节材料提炼成一份"
+        "先速学、后深挖的知识笔记，让读者不看原视频也能迅速理解最有价值的内容。"
+        "忠于材料，不编造；合并重复信息，删除寒暄、推广和无信息量细节。"
+        "核心概念要用通俗语言解释是什么、为什么、如何工作、何时使用及其边界。"
+        "复杂流程、架构、依赖或因果关系适合时使用有效的 Mermaid 图，不为装饰而画图。"
+        "不要生成练习题、自测题、学习任务或泛泛的课程评价。"
+        "输出适合 Obsidian 阅读的 Markdown，不输出 YAML frontmatter、一级标题或重复的视频标题。"
         f"使用{output_language}输出。"
     )
 
-    user_text = f"""请基于以下逐章笔记，制作完整课程学习指南。
+    user_text = f"""请基于以下材料，提炼一份一眼能抓住精华、需要时又能继续深挖的知识笔记。
 
-# 元信息
+【输入元信息】
 - 标题: {title}
 - 链接: {url}
 - 作者/频道: {uploader or "未知"}
-- 简介(可能截断): {description or "无"}
+- 简介（可能截断）: {description or "无"}
 
-# 已逐段覆盖的详细章节笔记
+【已逐段覆盖的章节材料】
 {detailed_material}
 
-# 输出格式（Markdown）
-## 课程定位与学习成果
-说明课程解决什么问题，学完具体能做什么。
+【编辑原则】
+1. 只保留能帮助读者理解、判断或执行的知识；同一事实只讲一次。
+2. 先给结论和全局关系，再解释原理与细节；术语首次出现时给出白话解释。
+3. 重要判断尽量附原视频时间戳，例如 `[12:34]`；无法从材料确认时明确说明，不猜测。
+4. 没有实质内容的可选章节直接省略，不用写“无”或硬凑篇幅。
+5. 不生成练习题、自测题、课后任务、学习目标清单或空泛感想。
+6. 不输出 YAML、一级标题或视频标题，必须从 `## 一眼看懂` 开始。
 
-## 完整知识地图
-按依赖关系组织全部概念，不限制条目数量。
+【输出结构】
+## 一眼看懂
+使用以下顺序控制在约 600–1000 个中文字符，让读者在首屏附近抓住内容：
 
-## 核心概念深讲
-逐个解释重要术语的定义、原理、用途、示例及相互区别。
+> [!abstract] 一句话结论
+> 用一句具体的话说清这份材料最重要的结论。
 
-## 从零到一实战操作手册
-按实际执行顺序写出完整流程、操作位置、命令意图、结果和检查方法。
+### 核心知识表
+使用 Markdown 表格，列为“知识｜通俗解释｜什么时候有用｜重要度”。重要度只使用“必懂、常用、补充”。
 
-## 关键概念对比表
-把容易混淆的概念放入 Markdown 表格，列出行为、适用场景、风险和协作影响。
+> [!tip] 最短理解路径
+> 用 3–6 个带箭头的短步骤串起理解顺序；实操类内容则给出最短可执行路径。
 
-## 常见错误、风险与恢复方法
-覆盖材料中提到的全部限制和警告，并给出对应处理方式。
+如果材料确有高风险误区，再添加：
+> [!warning] 最容易踩的坑
+> 只列会造成错误理解、失败或损失的关键问题。
 
-## 画面与演示细节
-结合截图和章节笔记解释界面、图示、代码或字幕；没有证据时明确说明。
+## 知识脉络
+解释核心知识之间的依赖、流程或因果关系。遇到至少 3 个相互关联节点的复杂流程、系统架构、
+状态变化或决策分支时，优先生成 1 幅 Mermaid 图；简单内容使用列表，不要硬画图。
+Mermaid 必须能直接在 Obsidian 渲染：使用 `flowchart LR` 或 `flowchart TD`，节点文字放在引号中，
+标签简短，连线写明动作或关系，并用 `classDef` 的浅黄、浅绿、浅蓝、浅紫区分不同角色。
+样式参考（按实际知识改写，不要照抄节点）：
 
-## 分阶段学习与练习
-提供由浅入深的动手练习，每项写清目标、步骤和验收标准。
+~~~mermaid
+flowchart LR
+    A["输入"] ==>|关键动作| B["处理"]
+    B --> C["结果"]
+    classDef input fill:#fff3bf,stroke:#e67700,stroke-width:2px,color:#111827
+    classDef process fill:#d3f9d8,stroke:#2f9e44,stroke-width:2px,color:#111827
+    classDef result fill:#d0ebff,stroke:#1971c2,stroke-width:2px,color:#111827
+    class A input
+    class B process
+    class C result
+~~~
 
-## 复习清单
-给出足够覆盖全课程的自测问题，不限制为 3–8 条。
+## 核心知识精讲
+按重要性排列，而不是机械照搬视频顺序。每个知识点使用三级标题，并包含：
+- **通俗理解**：先用日常语言讲明白。
+- **原理与价值**：解释为什么成立、解决什么问题。
+- **使用场景**：说明何时有用，何时不适用。
+- **例子或证据**：仅使用材料中的例子、命令、数据或画面证据。
+内容可按知识密度增减，不要为了统一格式重复同一句话。
 
-材料充足时，以上综合指南不少于 4000 个中文字符。不要重复粘贴逐章笔记，
-而要补充跨章节关系、实战顺序和对比；逐章原始学习笔记会作为后续章节单独附上。
+## 实际怎么做
+仅在材料包含可执行流程时保留。按真实顺序写出步骤、操作位置或命令、预期结果和判断方法；
+命令及代码使用带语言标识的代码块。
+
+## 对比与选择
+仅在存在容易混淆的概念或多种方案时保留。使用表格呈现差异、适用场景、优势、代价和选择依据。
+
+## 易错点与边界
+只收录材料支持的重要限制。优先使用“现象｜原因｜正确做法”表格，区分事实、讲者建议和不确定信息。
+
+## 画面中的关键信息
+仅在所附关键帧提供了旁白之外的有效信息时保留，解释界面、图表、代码或字幕具体说明了什么。
+
+## 最后记住
+用 3–7 条高信息密度结论收尾，每条都应当在脱离上下文后仍然有意义。
+
+全文详略随材料的信息密度，不设固定总字数，不凑篇幅。综合跨章节关系并去重，
+不要复制粘贴逐章材料；逐章材料稍后会作为折叠的追溯区自动附在文末。
 """
 
     if on_progress:
-        on_progress("整合知识地图、操作手册和练习", 0.86)
+        on_progress("提炼一眼看懂、知识脉络和核心知识", 0.86)
 
     content: list[dict] = [{"type": "text", "text": user_text}]
     for fp in frames[:12]:
@@ -361,7 +420,13 @@ def summarize(
     )
     overview = _response_text(resp)
     if on_progress:
-        on_progress("详细学习笔记生成完成", 1.0)
+        on_progress("精华知识笔记生成完成", 1.0)
     if not chapter_notes:
         return overview
-    return f"{overview}\n\n## 逐章完整学习笔记\n\n" + "\n\n".join(chapter_notes)
+    chapter_callouts = [_chapter_callout(note) for note in chapter_notes]
+    return (
+        f"{overview}\n\n## 逐章参考笔记\n\n"
+        "> [!info] 如何使用\n"
+        "> 以下内容按原视频时间顺序保留，用于追溯上下文；默认折叠，不影响精华阅读。\n\n"
+        + "\n\n".join(callout for callout in chapter_callouts if callout)
+    )

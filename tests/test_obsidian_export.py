@@ -38,6 +38,12 @@ class ObsidianExportTests(unittest.TestCase):
 
             content = note.read_text(encoding="utf-8")
             self.assertIn('title: "Course: Intro"', content)
+            self.assertIn('type: "learning-note"', content)
+            self.assertIn("media: video", content)
+            self.assertIn("duration_seconds: 10", content)
+            self.assertIn("  - learning-note", content)
+            self.assertIn("  - media-summary", content)
+            self.assertIn("  - video-summary", content)
             self.assertIn('source: "https://example.test/course"', content)
             self.assertIn("# Course", content)
             self.assertIn("![[Video Summaries/assets/", content)
@@ -63,6 +69,31 @@ class ObsidianExportTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 export_to_vault(summary, metadata, vault, folder="../outside")
+
+    def test_marks_local_audio_as_audio_learning_note(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            summary = root / "summary.md"
+            summary.write_text("## 一眼看懂\n\nAudio notes", encoding="utf-8")
+            vault = root / "vault"
+            vault.mkdir()
+            source = root / "meeting.m4a"
+            metadata = DownloadResult(
+                video_path=None,
+                audio_path=source,
+                title="Meeting",
+                duration=None,
+                webpage_url=source.as_uri(),
+                description="",
+                uploader="本地文件",
+            )
+
+            note = export_to_vault(summary, metadata, vault)
+
+            content = note.read_text(encoding="utf-8")
+            self.assertIn("media: audio", content)
+            self.assertIn("duration_seconds: null", content)
+            self.assertIn("  - audio-summary", content)
 
 
 if __name__ == "__main__":

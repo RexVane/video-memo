@@ -105,7 +105,7 @@ python src/pipeline.py "URL" --api-base-url "https://api.example.com/v1" --llm-m
 
 每次运行会在 `output/时间戳_标题/` 下生成：
 
-- `summary.md` — 结构化总结
+- `summary.md` — “先速学、后深挖”的精华知识笔记（复杂关系可含 Mermaid 图）
 - `transcript.txt` — 带时间戳的转写
 - `audio.wav` — 提取的音轨
 - `frames/` — 关键帧（若启用视觉）
@@ -115,6 +115,8 @@ python src/pipeline.py "URL" --api-base-url "https://api.example.com/v1" --llm-m
 使用 `--cleanup-media` 时，只清理本次输出目录中的下载媒体与 `audio.wav`；本地输入原文件永远不会被删除。清理后的运行目录仍可通过 `--regenerate` 重新生成报告。
 
 指定 `--obsidian-vault` 后，程序会生成带 YAML frontmatter 的稳定命名笔记，并把关键帧复制到 Vault 内的附件目录。再次处理同一来源会更新同一篇笔记。
+
+知识笔记先用一句话结论、核心知识表和最短理解路径呈现视频精华，再展开知识脉络、核心原理、实际操作、对比与易错点。流程、架构、依赖或因果关系较复杂时会生成 Obsidian 可直接渲染的 Mermaid 图；逐章来源笔记默认折叠在文末，便于按时间戳追溯。报告不会生成练习题或自测题。
 
 ## Obsidian 桌面插件
 

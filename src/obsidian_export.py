@@ -8,8 +8,9 @@ import re
 import shutil
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
-from download import DownloadResult
+from download import AUDIO_EXTS, VIDEO_EXTS, DownloadResult
 
 
 def _safe_name(value: str, limit: int = 80) -> str:
@@ -26,6 +27,17 @@ def _vault_folder(vault: Path, folder: str) -> Path:
     if not target.is_relative_to(vault):
         raise ValueError("Obsidian 目标文件夹不能超出 Vault")
     return target
+
+
+def _media_type(metadata: DownloadResult, has_frames: bool) -> str:
+    source_path = unquote(urlparse(metadata.webpage_url).path)
+    source_suffix = Path(source_path).suffix.lower()
+    if source_suffix in AUDIO_EXTS:
+        return "audio"
+    if metadata.video_path or has_frames or source_suffix in VIDEO_EXTS:
+        return "video"
+    is_remote = metadata.webpage_url.startswith(("http://", "https://"))
+    return "video" if is_remote else "audio"
 
 
 def export_to_vault(
@@ -60,15 +72,26 @@ def export_to_vault(
             vault_relative = copied.relative_to(vault).as_posix()
             frame_links.append(f"![[{vault_relative}]]")
 
+    media_type = _media_type(metadata, bool(source_frames))
+    duration = (
+        json.dumps(metadata.duration, ensure_ascii=False)
+        if metadata.duration is not None
+        else "null"
+    )
     frontmatter = "\n".join(
         [
             "---",
             f"title: {json.dumps(metadata.title, ensure_ascii=False)}",
+            'type: "learning-note"',
+            f"media: {media_type}",
+            f"duration_seconds: {duration}",
             f"source: {json.dumps(metadata.webpage_url, ensure_ascii=False)}",
             f"author: {json.dumps(metadata.uploader or '未知', ensure_ascii=False)}",
             f"created: {json.dumps(datetime.now().isoformat(timespec='seconds'))}",
             "tags:",
-            "  - video-summary",
+            "  - learning-note",
+            "  - media-summary",
+            f"  - {media_type}-summary",
             "---",
             "",
         ]
