@@ -23,8 +23,10 @@ Commands:
 - `Video Summarizer: 总结视频链接或本地音视频`
 - `Video Summarizer: 从已有运行目录重新生成报告`
 - `Video Summarizer: 取消当前总结任务`
+- `Video Summarizer: 打开插件设置`
+- `Video Summarizer: 打开供应商设置`
 
-The task dialog separates video links from local media and provides a native file picker. The provider settings read the local `~/.cc-switch/cc-switch.db` in read-only mode and use a provider-list-to-detail workflow with CLI filters, masked environment data, and a model dropdown. A task can follow the current global cc-switch provider or pin one provider. Secrets are read only when the Python child process starts and are never written to plugin data.
+The task dialog separates video links from local media and provides a native file picker. The settings home keeps provider, project, Python, Vault, and cleanup options in one list. Opening the provider row enters a read-only cc-switch database page, then a provider detail page. The model dropdown requests the provider's OpenAI-compatible `/models` endpoint with its cc-switch URL and key, with local model fallback. A task can follow the current global cc-switch provider or pin one provider. Secrets are read only for model discovery or when the Python child process starts and are never written to plugin data.
 
 The plugin launches Python with `shell: false`, streams structured progress to the status bar, exports the note into the current Vault, and opens the generated note when processing completes.
 

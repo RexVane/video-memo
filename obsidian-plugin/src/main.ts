@@ -15,7 +15,7 @@ import {
   type App,
 } from "obsidian";
 
-import { resolveCcSwitchProviderRuntime } from "./ccswitch";
+import { loadCcSwitchProviders, resolveCcSwitchProviderRuntime } from "./ccswitch";
 import {
   CcSwitchProviderSettingsView,
   type CcSwitchUiSettings,
@@ -315,6 +315,9 @@ export default class VideoSummarizerPlugin extends Plugin {
     this.statusEl.addClass("video-summarizer-status");
     this.statusEl.setText("Video Summarizer: 就绪");
 
+    const settingTab = new VideoSummarizerSettingTab(this.app, this);
+    this.addSettingTab(settingTab);
+
     this.addRibbonIcon("video", "总结视频或录音", () => this.openSourceModal());
     this.addCommand({
       id: "summarize-video-or-audio",
@@ -335,7 +338,28 @@ export default class VideoSummarizerPlugin extends Plugin {
         return true;
       },
     });
-    this.addSettingTab(new VideoSummarizerSettingTab(this.app, this));
+    this.addCommand({
+      id: "open-settings",
+      name: "打开插件设置",
+      callback: () => {
+        this.openPluginSettings();
+        window.setTimeout(() => {
+          settingTab.showHome();
+          settingTab.display();
+        }, 0);
+      },
+    });
+    this.addCommand({
+      id: "open-provider-settings",
+      name: "打开供应商设置",
+      callback: () => {
+        this.openPluginSettings();
+        window.setTimeout(() => {
+          settingTab.showProviders();
+          settingTab.display();
+        }, 0);
+      },
+    });
   }
 
   onunload(): void {
@@ -528,6 +552,7 @@ export default class VideoSummarizerPlugin extends Plugin {
 class VideoSummarizerSettingTab extends PluginSettingTab {
   private readonly plugin: VideoSummarizerPlugin;
   private readonly providerView: CcSwitchProviderSettingsView;
+  private page: "settings" | "providers" = "settings";
 
   constructor(app: App, plugin: VideoSummarizerPlugin) {
     super(app, plugin);
@@ -540,15 +565,46 @@ class VideoSummarizerSettingTab extends PluginSettingTab {
         await this.plugin.saveData(this.plugin.settings);
       },
       rerender: () => this.display(),
+      onBack: () => {
+        this.page = "settings";
+        this.display();
+      },
     });
   }
 
   display(): void {
     const { containerEl } = this;
+    containerEl.addClass("video-summarizer-settings-tab");
     containerEl.empty();
     containerEl.createEl("h2", { text: "Video Summarizer" });
-    if (this.providerView.render(containerEl)) return;
-    containerEl.createEl("h3", { text: "运行设置" });
+    if (this.page === "providers") {
+      this.providerView.render(containerEl);
+      return;
+    }
+
+    const openProviders = (): void => {
+      this.page = "providers";
+      this.providerView.showProviderList();
+      this.display();
+    };
+    const providerSetting = new Setting(containerEl)
+      .setName("供应商")
+      .setDesc(this.providerDescription())
+      .addExtraButton((button) =>
+        button.setIcon("chevron-right").setTooltip("打开供应商设置").onClick(openProviders),
+      );
+    providerSetting.settingEl.addClass("video-summarizer-navigation-setting");
+    providerSetting.settingEl.setAttribute("role", "button");
+    providerSetting.settingEl.tabIndex = 0;
+    providerSetting.settingEl.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button")) return;
+      openProviders();
+    });
+    providerSetting.settingEl.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openProviders();
+    });
     new Setting(containerEl)
       .setName("项目目录")
       .setDesc("包含 src/pipeline.py 的 Video Summarizer 目录")
@@ -589,7 +645,40 @@ class VideoSummarizerSettingTab extends PluginSettingTab {
       );
   }
 
-  hide(): void {
+  showHome(): void {
+    this.page = "settings";
     this.providerView.showProviderList();
+  }
+
+  showProviders(): void {
+    this.page = "providers";
+    this.providerView.showProviderList();
+  }
+
+  private providerDescription(): string {
+    const settings = this.plugin.settings;
+    if (settings.providerSource === "environment") return "使用项目环境变量配置";
+    try {
+      const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
+      const provider = settings.ccSwitchFollowCurrent
+        ? providers.find(
+            (item) => item.appType === settings.ccSwitchAppType && item.isCurrent,
+          )
+        : providers.find(
+            (item) =>
+              item.appType === settings.ccSwitchAppType &&
+              item.id === settings.ccSwitchProviderId,
+          );
+      const mode = settings.ccSwitchFollowCurrent ? "跟随全局当前" : "已固定";
+      return provider
+        ? `cc-switch · ${provider.name} · ${mode}`
+        : `cc-switch · ${settings.ccSwitchAppType} · 配置需要检查`;
+    } catch {
+      return "cc-switch · 无法读取数据库";
+    }
+  }
+
+  hide(): void {
+    this.showHome();
   }
 }

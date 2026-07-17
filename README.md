@@ -118,7 +118,7 @@ python src/pipeline.py "URL" --api-base-url "https://api.example.com/v1" --llm-m
 
 ## Obsidian 桌面插件
 
-`obsidian-plugin/` 提供桌面版薄壳插件。它将链接与本地文件分为两个输入模式，提供系统文件选择器，并通过子进程调用本项目的 Python 引擎。供应商页只读连接本机 `~/.cc-switch/cc-switch.db`，先显示供应商列表，点击后进入配置详情；支持跟随 cc-switch 全局当前供应商、固定某个供应商，并从下拉框选择已发现的模型。密钥只在任务启动时读入子进程环境，不写入插件配置。运行时会在状态栏显示进度，支持取消和重新生成，并在完成后自动打开导出的笔记。
+`obsidian-plugin/` 提供桌面版薄壳插件。它将链接与本地文件分为两个输入模式，提供系统文件选择器，并通过子进程调用本项目的 Python 引擎。插件设置首页将供应商、项目目录和 Python 路径等选项放在同一栏目；点击供应商后进入 cc-switch 数据库与供应商列表，再点击具体供应商查看详情。模型下拉框会使用该供应商的 Base URL 和 Key 实时读取 OpenAI 兼容 `/models` 接口，失败时回退到本地配置模型。密钥只在请求或任务启动时读入内存，不写入插件配置。运行时会在状态栏显示进度，支持取消和重新生成，并在完成后自动打开导出的笔记。
 
 插件的 cc-switch 供应商交互、解析逻辑与布局改编自 [CLI-Manager](https://github.com/dark-hxx/CLI-Manager)，Copyright (c) 2026 Chenyme，依据 AGPL-3.0-or-later 使用。详见 `obsidian-plugin/NOTICE` 与 `obsidian-plugin/LICENSE`。
 

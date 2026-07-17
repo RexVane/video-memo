@@ -2,6 +2,7 @@ import { Notice, setIcon, type App } from "obsidian";
 
 import {
   defaultCcSwitchDbPath,
+  fetchCcSwitchProviderModels,
   loadCcSwitchProviders,
   type CcSwitchProvider,
 } from "./ccswitch";
@@ -20,6 +21,15 @@ interface ViewOptions {
   getSettings: () => CcSwitchUiSettings;
   updateSettings: (patch: Partial<CcSwitchUiSettings>) => Promise<void>;
   rerender: () => void;
+  onBack: () => void;
+}
+
+interface ProviderModelState {
+  requestId: number;
+  status: "loading" | "loaded" | "error";
+  models: string[];
+  endpoint: string;
+  error: string;
 }
 
 function icon(parent: HTMLElement, name: string, className = ""): HTMLElement {
@@ -80,6 +90,8 @@ export class CcSwitchProviderSettingsView {
   private selectedAppType = "codex";
   private selectedProviderId = "";
   private configTab: "parsed" | "raw" = "parsed";
+  private readonly providerModelStates = new Map<string, ProviderModelState>();
+  private modelRequestId = 0;
 
   constructor(options: ViewOptions) {
     this.options = options;
@@ -112,11 +124,22 @@ export class CcSwitchProviderSettingsView {
         .filter((provider) => provider.appType === selectedProvider.appType)
         .map((provider) => provider.model)
         .filter((model): model is string => Boolean(model));
+      const modelState = this.ensureProviderModels(selectedProvider);
       const detail = section.createDiv({ cls: "ccswitch-provider-detail" });
-      this.renderProviderDetail(detail, selectedProvider, settings, modelOptions);
+      this.renderProviderDetail(detail, selectedProvider, settings, modelOptions, modelState);
       return true;
     }
     if (this.selectedProviderId) this.showProviderList();
+
+    const back = section.createDiv({ cls: "ccswitch-page-back" });
+    actionButton(back, {
+      label: "返回设置",
+      icon: "arrow-left",
+      onClick: () => {
+        this.showProviderList();
+        this.options.onBack();
+      },
+    });
 
     const heading = section.createDiv({ cls: "ccswitch-heading" });
     const headingCopy = heading.createDiv();
@@ -249,6 +272,7 @@ export class CcSwitchProviderSettingsView {
       }
       void this.options.updateSettings({ ccSwitchDbPath: path }).then(() => {
         this.selectedProviderId = "";
+        this.providerModelStates.clear();
         this.options.rerender();
       });
     });
@@ -264,6 +288,7 @@ export class CcSwitchProviderSettingsView {
         onClick: () => {
           void this.options.updateSettings({ ccSwitchDbPath: "" }).then(() => {
             this.selectedProviderId = "";
+            this.providerModelStates.clear();
             this.options.rerender();
           });
         },
@@ -272,7 +297,10 @@ export class CcSwitchProviderSettingsView {
     actionButton(controls, {
       label: "刷新",
       icon: "refresh-cw",
-      onClick: () => this.options.rerender(),
+      onClick: () => {
+        this.providerModelStates.clear();
+        this.options.rerender();
+      },
     });
     card.createEl("code", {
       cls: "ccswitch-database-path",
@@ -338,6 +366,7 @@ export class CcSwitchProviderSettingsView {
     row.addEventListener("click", () => {
       this.selectedProviderId = provider.id;
       this.configTab = "parsed";
+      this.providerModelStates.delete(this.providerModelKey(provider));
       this.options.rerender();
     });
   }
@@ -347,6 +376,7 @@ export class CcSwitchProviderSettingsView {
     provider: CcSwitchProvider,
     settings: CcSwitchUiSettings,
     modelOptions: string[],
+    modelState: ProviderModelState,
   ): void {
     const hero = parent.createDiv({ cls: "ccswitch-detail-hero" });
     const heroMain = hero.createDiv({ cls: "ccswitch-detail-main" });
@@ -402,7 +432,7 @@ export class CcSwitchProviderSettingsView {
       },
     });
 
-    this.renderModelSelector(parent, provider, settings, modelOptions);
+    this.renderModelSelector(parent, provider, settings, modelOptions, modelState);
 
     const metadata = parent.createDiv({ cls: "ccswitch-metadata-grid" });
     metadataField(metadata, "CLI 类型", provider.appType, "terminal");
@@ -463,21 +493,28 @@ export class CcSwitchProviderSettingsView {
     parent: HTMLElement,
     provider: CcSwitchProvider,
     settings: CcSwitchUiSettings,
-    models: string[],
+    fallbackModels: string[],
+    modelState: ProviderModelState,
   ): void {
     const card = parent.createDiv({ cls: "ccswitch-model-selector" });
     const copy = card.createDiv({ cls: "ccswitch-model-selector-copy" });
     const title = copy.createDiv({ cls: "ccswitch-section-title" });
     icon(title, "cpu");
     title.createSpan({ text: "总结模型" });
+    const statusText =
+      modelState.status === "loading"
+        ? "正在使用供应商 Key 和 URL 获取模型列表..."
+        : modelState.status === "loaded"
+          ? `已实时获取 ${modelState.models.length} 个模型`
+          : `实时获取失败：${modelState.error}；当前显示本地模型`;
     copy.createDiv({
-      cls: "ccswitch-muted",
-      text: provider.model
-        ? `默认跟随 ${provider.name}：${provider.model}`
-        : `该供应商未声明默认模型`,
+      cls: `ccswitch-model-status${modelState.status === "error" ? " is-error" : ""}`,
+      text: statusText,
+      attr: modelState.endpoint ? { title: modelState.endpoint } : {},
     });
 
-    const select = card.createEl("select", {
+    const controls = card.createDiv({ cls: "ccswitch-model-controls" });
+    const select = controls.createEl("select", {
       cls: "dropdown ccswitch-model-dropdown",
       attr: { "aria-label": "选择总结模型" },
     });
@@ -485,9 +522,10 @@ export class CcSwitchProviderSettingsView {
       value: "",
       text: provider.model ? `跟随供应商默认 (${provider.model})` : "跟随供应商默认",
     });
-    const options = [...new Set([...models, settings.model].filter(Boolean))].sort((a, b) =>
-      a.localeCompare(b),
-    );
+    const sourceModels = modelState.status === "loaded" ? modelState.models : fallbackModels;
+    const options = [
+      ...new Set([...sourceModels, provider.model ?? "", settings.model].filter(Boolean)),
+    ].sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
     for (const model of options) {
       select.createEl("option", { value: model, text: model });
     }
@@ -495,6 +533,70 @@ export class CcSwitchProviderSettingsView {
     select.addEventListener("change", () => {
       void this.options.updateSettings({ model: select.value });
     });
+    const refresh = controls.createEl("button", {
+      cls: `clickable-icon ccswitch-model-refresh${
+        modelState.status === "loading" ? " is-loading" : ""
+      }`,
+      attr: { type: "button", "aria-label": "实时刷新模型列表" },
+    });
+    setIcon(refresh, "refresh-cw");
+    refresh.disabled = modelState.status === "loading";
+    refresh.addEventListener("click", () => this.startProviderModelRequest(provider, true));
+  }
+
+  private providerModelKey(provider: CcSwitchProvider): string {
+    return `${provider.appType}:${provider.id}`;
+  }
+
+  private ensureProviderModels(provider: CcSwitchProvider): ProviderModelState {
+    const existing = this.providerModelStates.get(this.providerModelKey(provider));
+    return existing ?? this.startProviderModelRequest(provider, false);
+  }
+
+  private startProviderModelRequest(
+    provider: CcSwitchProvider,
+    rerender: boolean,
+  ): ProviderModelState {
+    const key = this.providerModelKey(provider);
+    const requestId = ++this.modelRequestId;
+    const state: ProviderModelState = {
+      requestId,
+      status: "loading",
+      models: [],
+      endpoint: "",
+      error: "",
+    };
+    this.providerModelStates.set(key, state);
+    if (rerender) this.options.rerender();
+
+    void fetchCcSwitchProviderModels({
+      dbPath: this.options.getSettings().ccSwitchDbPath,
+      appType: provider.appType,
+      providerId: provider.id,
+    })
+      .then((response) => {
+        if (this.providerModelStates.get(key)?.requestId !== requestId) return;
+        this.providerModelStates.set(key, {
+          requestId,
+          status: "loaded",
+          models: response.models,
+          endpoint: response.endpoint,
+          error: "",
+        });
+        this.options.rerender();
+      })
+      .catch((error: unknown) => {
+        if (this.providerModelStates.get(key)?.requestId !== requestId) return;
+        this.providerModelStates.set(key, {
+          requestId,
+          status: "error",
+          models: [],
+          endpoint: provider.baseUrl ?? "",
+          error: error instanceof Error ? error.message : String(error),
+        });
+        this.options.rerender();
+      });
+    return state;
   }
 
   private renderConfigTab(

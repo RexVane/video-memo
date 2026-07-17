@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { requestUrl } from "obsidian";
 import { parse as parseToml } from "smol-toml";
 
 type JsonRecord = Record<string, unknown>;
@@ -58,6 +59,11 @@ export interface CcSwitchProviderRuntime {
   model: string | null;
   apiFormat: string | null;
   apiKey: string;
+}
+
+export interface CcSwitchModelListResponse {
+  endpoint: string;
+  models: string[];
 }
 
 interface ProviderRow extends Record<string, unknown> {
@@ -369,5 +375,116 @@ export function resolveCcSwitchProviderRuntime(options: {
     };
   } finally {
     db.close();
+  }
+}
+
+export function openAiModelsUrl(baseUrl: string): string {
+  const url = new URL(baseUrl.trim());
+  if (!(["http:", "https:"] as string[]).includes(url.protocol)) {
+    throw new Error("模型接口 Base URL 必须使用 http 或 https");
+  }
+  if (url.username || url.password) {
+    throw new Error("模型接口 Base URL 不能包含用户名或密码");
+  }
+  if (url.search || url.hash) {
+    throw new Error("模型接口 Base URL 不能包含查询参数或锚点");
+  }
+
+  const path = url.pathname.replace(/\/+$/, "");
+  if (!path) {
+    url.pathname = "/v1/models";
+  } else if (!/\/models$/i.test(path)) {
+    url.pathname = `${path}/models`;
+  }
+  return url.toString();
+}
+
+function modelIdsFromResponse(payload: unknown): string[] {
+  const record = asRecord(payload);
+  const candidates = Array.isArray(payload)
+    ? payload
+    : Array.isArray(record?.data)
+      ? record.data
+      : Array.isArray(record?.models)
+        ? record.models
+        : [];
+  const models = candidates
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      const model = asRecord(item);
+      return textValue(model?.id) ?? textValue(model?.name) ?? textValue(model?.model) ?? "";
+    })
+    .filter((model) => model.length > 0 && model.length <= 200);
+  return [...new Set(models)].sort((left, right) =>
+    left.localeCompare(right, "en", { numeric: true, sensitivity: "base" }),
+  );
+}
+
+function responseErrorDetail(text: string): string {
+  try {
+    const payload = asRecord(JSON.parse(text));
+    const error = asRecord(payload?.error);
+    const detail = textValue(error?.message) ?? textValue(payload?.message);
+    return detail?.slice(0, 240) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+export async function fetchCcSwitchProviderModels(options: {
+  dbPath?: string;
+  appType: string;
+  providerId: string;
+}): Promise<CcSwitchModelListResponse> {
+  const runtime = resolveCcSwitchProviderRuntime({
+    dbPath: options.dbPath,
+    appType: options.appType,
+    followCurrent: false,
+    providerId: options.providerId,
+  });
+  const endpoint = openAiModelsUrl(runtime.baseUrl);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const response = await Promise.race([
+      requestUrl({
+        url: endpoint,
+        method: "GET",
+        headers: {
+          Accept: "application/json",
+          Authorization: `Bearer ${runtime.apiKey}`,
+        },
+        throw: false,
+      }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("模型接口请求超时（15 秒）")), 15_000);
+      }),
+    ]);
+    if (response.status < 200 || response.status >= 300) {
+      const label =
+        response.status === 401 || response.status === 403
+          ? "模型接口鉴权失败"
+          : response.status === 404
+            ? "未找到模型接口"
+            : "模型接口请求失败";
+      const detail = responseErrorDetail(response.text);
+      throw new Error(`${label} (HTTP ${response.status})${detail ? `：${detail}` : ""}`);
+    }
+
+    let payload: unknown;
+    try {
+      payload = JSON.parse(response.text);
+    } catch {
+      throw new Error("模型接口没有返回有效 JSON");
+    }
+    const models = modelIdsFromResponse(payload);
+    if (models.length === 0) {
+      throw new Error("模型接口返回成功，但列表为空");
+    }
+    return { endpoint, models };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message.replaceAll(runtime.apiKey, "***"));
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
