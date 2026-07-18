@@ -147,6 +147,138 @@ class PipelineTests(unittest.TestCase):
             self.assertIsNotNone(reusable)
             self.assertEqual(reusable[0], work)
 
+    def test_local_cache_is_rejected_after_source_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mp4"
+            source.write_bytes(b"original")
+            source_stat = source.stat()
+            work = root / "output" / "completed"
+            work.mkdir(parents=True)
+            (work / "transcript.txt").write_text("old", encoding="utf-8")
+            (work / "info.json").write_text(
+                json.dumps(
+                    {
+                        "title": "Lecture",
+                        "webpage_url": source.resolve().as_uri(),
+                        "video_path": str(source.resolve()),
+                        "audio_path": None,
+                        "media_has_video": True,
+                        "source_fingerprint": {
+                            "size": source_stat.st_size,
+                            "mtime_ns": source_stat.st_mtime_ns,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            source.write_bytes(b"replacement with different contents")
+
+            reusable = pipeline._find_reusable_download(
+                root / "output",
+                source.resolve().as_uri(),
+                local_source=source,
+                whisper_model="base",
+            )
+
+            self.assertIsNone(reusable)
+
+    def test_text_only_cleaned_cache_does_not_satisfy_vision_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "completed"
+            work.mkdir()
+            (work / "transcript.txt").write_text("text", encoding="utf-8")
+            (work / "info.json").write_text(
+                json.dumps(
+                    {
+                        "title": "Course",
+                        "webpage_url": "https://example.test/course",
+                        "video_path": "missing.mp4",
+                        "audio_path": "missing.wav",
+                        "media_has_video": True,
+                        "transcript": {
+                            "source": "whisper",
+                            "model": "base",
+                            "language": "en",
+                            "requested_language": None,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            reusable = pipeline._find_reusable_download(
+                root,
+                "https://example.test/course",
+                whisper_model="base",
+                require_vision=True,
+                max_frames=8,
+            )
+
+            self.assertIsNone(reusable)
+
+    def test_transcript_cache_tracks_whisper_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "transcript.txt").write_text("text", encoding="utf-8")
+            info = {
+                "transcript": {
+                    "source": "whisper",
+                    "model": "base",
+                    "language": "zh",
+                    "requested_language": "zh",
+                }
+            }
+
+            self.assertFalse(
+                pipeline._transcript_cache_compatible(
+                    work,
+                    info,
+                    whisper_model="small",
+                    language="zh",
+                )
+            )
+
+    def test_cached_frames_do_not_claim_more_than_previous_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            frames = work / "frames"
+            frames.mkdir()
+            for index in range(4):
+                (frames / f"frame_{index:03d}.jpg").write_bytes(b"frame")
+            info = {
+                "media_has_video": True,
+                "video_path": "missing.mp4",
+                "vision": {"requested_max_frames": 4, "frame_count": 4},
+            }
+            result = DownloadResult(
+                video_path=None,
+                audio_path=None,
+                title="Course",
+                duration=10,
+                webpage_url="https://example.test/course",
+                description="",
+                uploader="",
+            )
+
+            self.assertTrue(
+                pipeline._vision_cache_compatible(
+                    work,
+                    info,
+                    result,
+                    max_frames=4,
+                )
+            )
+            self.assertFalse(
+                pipeline._vision_cache_compatible(
+                    work,
+                    info,
+                    result,
+                    max_frames=8,
+                )
+            )
+
     def test_missing_api_key_fails_before_probe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             pipeline.shutil, "which", return_value="tool"

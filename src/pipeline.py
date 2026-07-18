@@ -192,6 +192,12 @@ def _url_identity(url: str) -> str:
 def _find_reusable_download(
     out_root: Path,
     webpage_url: str,
+    *,
+    local_source: Path | None = None,
+    whisper_model: str | None = None,
+    language: str | None = None,
+    require_vision: bool = False,
+    max_frames: int = 8,
 ) -> tuple[Path, DownloadResult] | None:
     if not out_root.is_dir():
         return None
@@ -204,9 +210,127 @@ def _find_reusable_download(
     for info_path in info_files:
         work_dir = info_path.parent
         result = load_download_result(work_dir)
-        if result and _url_identity(result.webpage_url) == target_url:
-            return work_dir, result
+        if not result or _url_identity(result.webpage_url) != target_url:
+            continue
+        info = _read_run_info(work_dir)
+        if local_source and not _local_source_matches(info, local_source):
+            continue
+        if whisper_model is not None and not _transcript_cache_compatible(
+            work_dir,
+            info,
+            whisper_model=whisper_model,
+            language=language,
+        ):
+            if not result.audio_path:
+                continue
+        if require_vision and not _vision_cache_compatible(
+            work_dir,
+            info,
+            result,
+            max_frames=max_frames,
+        ):
+            continue
+        return work_dir, result
     return None
+
+
+def _read_run_info(work_dir: Path) -> dict:
+    try:
+        value = json.loads((work_dir / "info.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _update_run_info(work_dir: Path, key: str, value: dict) -> None:
+    info_path = work_dir / "info.json"
+    info = _read_run_info(work_dir)
+    if not info:
+        return
+    info[key] = value
+    temporary = info_path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(info, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    temporary.replace(info_path)
+
+
+def _language_matches(stored: object, requested: str | None) -> bool:
+    if requested is None:
+        return True
+    if not isinstance(stored, str) or not stored.strip():
+        return False
+    left = stored.strip().lower().replace("_", "-")
+    right = requested.strip().lower().replace("_", "-")
+    return (
+        left == right
+        or left.startswith(right + "-")
+        or right.startswith(left + "-")
+    )
+
+
+def _transcript_cache_compatible(
+    work_dir: Path,
+    info: dict,
+    *,
+    whisper_model: str,
+    language: str | None,
+) -> bool:
+    transcript_path = work_dir / "transcript.txt"
+    if not transcript_path.is_file() or transcript_path.stat().st_size == 0:
+        return False
+    metadata = info.get("transcript")
+    if not isinstance(metadata, dict):
+        return language is None and whisper_model == "base"
+    source = metadata.get("source")
+    if source == "platform":
+        return _language_matches(metadata.get("language"), language)
+    if source != "whisper" or metadata.get("model") != whisper_model:
+        return False
+    requested_language = metadata.get("requested_language")
+    actual_language = metadata.get("language")
+    return _language_matches(requested_language or actual_language, language)
+
+
+def _local_source_matches(info: dict, source: Path) -> bool:
+    fingerprint = info.get("source_fingerprint")
+    if not isinstance(fingerprint, dict):
+        return False
+    try:
+        stat = source.stat()
+        return (
+            int(fingerprint.get("size")) == stat.st_size
+            and int(fingerprint.get("mtime_ns")) == stat.st_mtime_ns
+        )
+    except (OSError, TypeError, ValueError):
+        return False
+
+
+def _vision_cache_compatible(
+    work_dir: Path,
+    info: dict,
+    result: DownloadResult,
+    *,
+    max_frames: int,
+) -> bool:
+    has_video = info.get("media_has_video")
+    if not isinstance(has_video, bool):
+        has_video = bool(info.get("video_path"))
+    if not has_video:
+        return True
+    if result.video_path and result.video_path.is_file():
+        return True
+    frames = list((work_dir / "frames").glob("frame_*.jpg"))
+    if not frames:
+        return False
+    vision = info.get("vision")
+    if isinstance(vision, dict):
+        try:
+            return int(vision.get("requested_max_frames")) >= max_frames
+        except (TypeError, ValueError):
+            return False
+    return len(frames) >= max_frames
 
 
 def _write_reports(
@@ -326,7 +450,15 @@ def run(
 
     if local_source:
         progress(f"[1/4] 使用本地文件: {local_source}", 0.02)
-        reusable = _find_reusable_download(out_root, local_source.as_uri())
+        reusable = _find_reusable_download(
+            out_root,
+            local_source.as_uri(),
+            local_source=local_source,
+            whisper_model=whisper_model,
+            language=language,
+            require_vision=not no_vision,
+            max_frames=max_frames,
+        )
         if reusable:
             work, dl = reusable
             progress(f"[1/4] 复用已有处理结果\n  工作目录: {work}", 0.25)
@@ -343,7 +475,14 @@ def run(
             progress=progress,
             language=language,
         )
-        reusable = _find_reusable_download(out_root, metadata.webpage_url)
+        reusable = _find_reusable_download(
+            out_root,
+            metadata.webpage_url,
+            whisper_model=whisper_model,
+            language=language,
+            require_vision=not no_vision,
+            max_frames=max_frames,
+        )
         if reusable:
             work, dl = reusable
             progress(f"[1/4] 复用已有处理结果\n  工作目录: {work}", 0.25)
@@ -362,14 +501,24 @@ def run(
         progress(f"  时长: {dl.duration:.0f}s", 0.28)
 
     transcript_path = work / "transcript.txt"
-    if transcript_path.is_file() and transcript_path.stat().st_size > 0:
+    run_info = _read_run_info(work)
+    if _transcript_cache_compatible(
+        work,
+        run_info,
+        whisper_model=whisper_model,
+        language=language,
+    ):
         progress("[2/4] 复用已有语音转写", 0.55)
         tr = Transcript(
             language=language,
             text=transcript_path.read_text(encoding="utf-8"),
             segments=[],
         )
-    elif dl.subtitle_path and dl.subtitle_path.is_file():
+    elif (
+        dl.subtitle_path
+        and dl.subtitle_path.is_file()
+        and _language_matches(dl.subtitle_language, language)
+    ):
         progress(
             f"[2/4] 使用平台字幕 ({dl.subtitle_language or '语言未知'})",
             0.42,
@@ -380,6 +529,15 @@ def run(
                 language=dl.subtitle_language or language,
             )
             save_transcript(tr, transcript_path)
+            _update_run_info(
+                work,
+                "transcript",
+                {
+                    "source": "platform",
+                    "language": tr.language,
+                    "requested_language": language,
+                },
+            )
             progress("  已跳过 Whisper 转写", 0.55)
         except Exception as error:
             progress(f"  平台字幕不可用，回退 Whisper: {error}", 0.32)
@@ -398,6 +556,16 @@ def run(
                 ),
             )
             save_transcript(tr, transcript_path)
+            _update_run_info(
+                work,
+                "transcript",
+                {
+                    "source": "whisper",
+                    "model": whisper_model,
+                    "language": tr.language,
+                    "requested_language": language,
+                },
+            )
     else:
         progress(f"[2/4] 语音转写 (Whisper {whisper_model})…", 0.30)
         if not dl.audio_path:
@@ -413,9 +581,20 @@ def run(
             ),
         )
         save_transcript(tr, transcript_path)
+        _update_run_info(
+            work,
+            "transcript",
+            {
+                "source": "whisper",
+                "model": whisper_model,
+                "language": tr.language,
+                "requested_language": language,
+            },
+        )
     progress(f"  语言: {tr.language or 'auto'} | 字数约: {len(tr.text)}", 0.55)
 
     frame_paths: list[Path] = []
+    vision_capacity: int | None = None
     existing_frames = sorted((work / "frames").glob("frame_*.jpg"))
     if not no_vision and dl.video_path and dl.video_path.exists():
         progress(f"[3/4] 抽取关键帧 (最多 {max_frames} 张)…", 0.60)
@@ -426,14 +605,36 @@ def run(
                 max_frames=max_frames,
                 duration=dl.duration,
             )
+            if frame_paths:
+                vision_capacity = max_frames
             progress(f"  得到 {len(frame_paths)} 帧", 0.70)
         except Exception as e:
             progress(f"  抽帧跳过: {e}", 0.70)
+            frame_paths = [path for path in existing_frames if path.is_file()][
+                :max_frames
+            ]
     elif not no_vision and existing_frames:
         frame_paths = existing_frames[:max_frames]
+        existing_vision = run_info.get("vision")
+        if isinstance(existing_vision, dict):
+            try:
+                vision_capacity = int(existing_vision.get("requested_max_frames"))
+            except (TypeError, ValueError):
+                vision_capacity = len(existing_frames)
+        else:
+            vision_capacity = len(existing_frames)
         progress(f"[3/4] 复用已有关键帧 ({len(frame_paths)} 张)", 0.70)
     else:
         progress("[3/4] 跳过画面分析", 0.70)
+    if not no_vision and frame_paths and vision_capacity is not None:
+        _update_run_info(
+            work,
+            "vision",
+            {
+                "requested_max_frames": vision_capacity,
+                "frame_count": len(frame_paths),
+            },
+        )
 
     progress(
         f"[4/4] AI 总结 ({llm_model})…\n  API: {llm_config.base_url}",

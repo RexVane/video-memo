@@ -32,7 +32,6 @@ var import_obsidian3 = require("obsidian");
 var import_node_fs = require("node:fs");
 var import_node_os = require("node:os");
 var import_node_path = require("node:path");
-var import_node_sqlite = require("node:sqlite");
 var import_obsidian = require("obsidian");
 
 // node_modules/smol-toml/dist/date.js
@@ -717,6 +716,8 @@ function parse(toml, { maxDepth = 1e3, integersAsBigInt } = {}) {
 
 // src/ccswitch.ts
 var SECRET_MARKERS = ["token", "key", "secret", "auth", "password"];
+var SECRET_ASSIGNMENT = /((?:"?[\w.-]*(?:token|key|secret|auth|password)[\w.-]*"?\s*[:=]\s*))(?:(?:"(?:\\.|[^"])*")|(?:'(?:\\.|[^'])*')|(?:[^,\s}\r\n#]+))/gi;
+var BEARER_SECRET = /(bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
 var BASE_URL_KEYS = [
   "OPENAI_BASE_URL",
   "OPENAI_API_BASE",
@@ -747,24 +748,33 @@ function textValue(value) {
 function normalizeKey(value) {
   return value.trim().replaceAll("-", "_").toUpperCase();
 }
-function keyMatches(key, exact, suffixes) {
-  const normalized = normalizeKey(key);
-  return exact.some((candidate) => normalized === normalizeKey(candidate)) || suffixes.some((suffix) => normalized.endsWith(normalizeKey(suffix)));
-}
-function findTextByKeyPatterns(value, exact, suffixes) {
+function findTextByKeyMatcher(value, matcher) {
   const record = asRecord(value);
   if (!record) return null;
   for (const [key, candidate] of Object.entries(record)) {
-    if (keyMatches(key, exact, suffixes)) {
+    if (matcher(key)) {
       const text = textValue(candidate);
       if (text) return text;
     }
   }
   for (const candidate of Object.values(record)) {
-    const nested = findTextByKeyPatterns(candidate, exact, suffixes);
+    const nested = findTextByKeyMatcher(candidate, matcher);
     if (nested) return nested;
   }
   return null;
+}
+function findTextByKeyPatterns(value, exact, suffixes) {
+  const normalizedExact = exact.map(normalizeKey);
+  const exactMatch = findTextByKeyMatcher(
+    value,
+    (key) => normalizedExact.includes(normalizeKey(key))
+  );
+  if (exactMatch) return exactMatch;
+  const normalizedSuffixes = suffixes.map(normalizeKey);
+  return findTextByKeyMatcher(
+    value,
+    (key) => normalizedSuffixes.some((suffix) => normalizeKey(key).endsWith(suffix))
+  );
 }
 function isSecretKey(key) {
   const lower = key.toLowerCase();
@@ -774,6 +784,9 @@ function maskSecret(value) {
   const characters = [...value];
   if (characters.length <= 12) return "***";
   return `${characters.slice(0, 4).join("")}...${characters.slice(-4).join("")}`;
+}
+function redactEmbeddedSecrets(value) {
+  return value.replace(SECRET_ASSIGNMENT, '$1"***"').replace(BEARER_SECRET, "$1***");
 }
 function collectMaskedEnv(config) {
   const result = {};
@@ -794,6 +807,9 @@ function redactSecrets(value, parentKey = "") {
   }
   if (Array.isArray(value)) {
     return value.map((item) => redactSecrets(item));
+  }
+  if (typeof value === "string") {
+    return redactEmbeddedSecrets(value);
   }
   const record = asRecord(value);
   if (!record) return value;
@@ -862,7 +878,7 @@ function parseProviderConfig(settingsConfig, metaRaw) {
       apiFormat: null,
       apiKey: null,
       maskedEnv: {},
-      redactedSettingsConfig: settingsConfig,
+      redactedSettingsConfig: "\u914D\u7F6E\u89E3\u6790\u5931\u8D25\u3002\u4E3A\u907F\u514D\u6CC4\u9732 API Key\uFF0C\u539F\u59CB\u914D\u7F6E\u5DF2\u9690\u85CF\u3002",
       parseError: true
     };
   }
@@ -898,6 +914,15 @@ function resolveCcSwitchDbPath(configuredPath) {
   const expanded = configured.startsWith("~") ? (0, import_node_path.join)((0, import_node_os.homedir)(), configured.slice(1).replace(/^[/\\]+/, "")) : configured;
   return (0, import_node_path.resolve)(expanded || defaultCcSwitchDbPath());
 }
+function loadNodeSqlite() {
+  try {
+    return require("node:sqlite");
+  } catch {
+    throw new Error(
+      "\u5F53\u524D Obsidian \u8FD0\u884C\u65F6\u4E0D\u652F\u6301 node:sqlite\u3002\u8BF7\u5347\u7EA7 Obsidian\uFF0C\u6216\u5207\u6362\u5230\u73AF\u5883\u914D\u7F6E\u3002"
+    );
+  }
+}
 function openDatabase(configuredPath) {
   const path = resolveCcSwitchDbPath(configuredPath);
   if ((0, import_node_path.extname)(path).toLowerCase() !== ".db") {
@@ -906,8 +931,9 @@ function openDatabase(configuredPath) {
   if (!(0, import_node_fs.existsSync)(path)) {
     throw new Error(`\u672A\u627E\u5230 cc-switch \u6570\u636E\u5E93: ${path}`);
   }
+  const { DatabaseSync } = loadNodeSqlite();
   return {
-    db: new import_node_sqlite.DatabaseSync(path, { readOnly: true, timeout: 15e3 }),
+    db: new DatabaseSync(path, { readOnly: true, timeout: 15e3 }),
     path
   };
 }

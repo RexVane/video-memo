@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "grok-4.5"
 BASE_URL_ENV_NAMES = (
     "LLM_BASE_URL",
@@ -20,12 +21,17 @@ BASE_URL_ENV_NAMES = (
     "XAI_BASE_URL",
     "GROK_MODELS_BASE_URL",
 )
-API_KEY_ENV_NAMES = (
-    "LLM_API_KEY",
-    "OPENAI_API_KEY",
+GENERIC_API_KEY_ENV_NAMES = ("LLM_API_KEY",)
+OPENAI_API_KEY_ENV_NAMES = ("OPENAI_API_KEY",)
+XAI_API_KEY_ENV_NAMES = (
     "GROK_API_KEY",
     "XAI_API_KEY",
     "GROK_CODE_XAI_API_KEY",
+)
+OPENAI_BASE_URL_ENV_NAMES = ("OPENAI_BASE_URL", "OPENAI_API_BASE")
+XAI_BASE_URL_ENV_NAMES = (
+    "XAI_BASE_URL",
+    "GROK_MODELS_BASE_URL",
 )
 
 load_dotenv(PROJECT_ROOT / ".env")
@@ -48,6 +54,29 @@ def _first_env(names: tuple[str, ...]) -> tuple[str | None, str | None]:
         if value:
             return value, name
     return None, None
+
+
+def _env_key_for_base(
+    base_url: str,
+    base_env_name: str | None,
+) -> tuple[str | None, str | None]:
+    if base_env_name == "LLM_BASE_URL":
+        return _first_env(GENERIC_API_KEY_ENV_NAMES)
+    if base_env_name in OPENAI_BASE_URL_ENV_NAMES:
+        key = _first_env(OPENAI_API_KEY_ENV_NAMES)
+        return key if key[0] else _first_env(GENERIC_API_KEY_ENV_NAMES)
+    if base_env_name in XAI_BASE_URL_ENV_NAMES:
+        key = _first_env(XAI_API_KEY_ENV_NAMES)
+        return key if key[0] else _first_env(GENERIC_API_KEY_ENV_NAMES)
+
+    hostname = (urlparse(base_url).hostname or "").lower()
+    if hostname == "api.openai.com":
+        key = _first_env(OPENAI_API_KEY_ENV_NAMES)
+        return key if key[0] else _first_env(GENERIC_API_KEY_ENV_NAMES)
+    if hostname == "api.x.ai" or hostname.endswith(".x.ai"):
+        key = _first_env(XAI_API_KEY_ENV_NAMES)
+        return key if key[0] else _first_env(GENERIC_API_KEY_ENV_NAMES)
+    return _first_env(GENERIC_API_KEY_ENV_NAMES)
 
 
 def _normalize_base_url(value: str) -> str:
@@ -76,6 +105,8 @@ def _local_grok_config(
         return None
 
     profiles = data.get("model") or {}
+    if not isinstance(profiles, dict):
+        return None
 
     def find_profile(name: str | None) -> dict | None:
         if not name:
@@ -94,12 +125,15 @@ def _local_grok_config(
 
     profile = find_profile(model)
     if not isinstance(profile, dict):
-        default_name = (data.get("models") or {}).get("default")
+        models = data.get("models") or {}
+        default_name = models.get("default") if isinstance(models, dict) else None
         profile = find_profile(default_name)
     if not isinstance(profile, dict):
         profile = {}
 
     endpoints = data.get("endpoints") or {}
+    if not isinstance(endpoints, dict):
+        endpoints = {}
     base_url = (
         profile.get("base_url")
         or profile.get("api_base_url")
@@ -131,19 +165,30 @@ def resolve_llm_config(
     explicit_key = (api_key or "").strip() or None
     explicit_base = (base_url or "").strip() or None
     env_base, env_base_name = _first_env(BASE_URL_ENV_NAMES)
-    env_key, env_key_name = _first_env(API_KEY_ENV_NAMES)
-    local = _local_grok_config(selected_model, grok_config_path)
 
     selected_base = explicit_base or env_base
     if selected_base:
         normalized_base = _normalize_base_url(selected_base)
+        matching_env_name = env_base_name if not explicit_base else None
+        if explicit_base and env_base:
+            try:
+                if _normalize_base_url(env_base) == normalized_base:
+                    matching_env_name = env_base_name
+            except ValueError:
+                pass
+        env_key, env_key_name = _env_key_for_base(
+            normalized_base,
+            matching_env_name,
+        )
         selected_key = explicit_key or env_key
         used_local_key = False
         source = "explicit configuration" if explicit_base else f"environment ({env_base_name})"
-        if not selected_key and local and local.base_url == normalized_base:
-            selected_key = local.api_key
-            source = local.source
-            used_local_key = True
+        if not selected_key:
+            local = _local_grok_config(selected_model, grok_config_path)
+            if local and local.base_url == normalized_base:
+                selected_key = local.api_key
+                source = local.source
+                used_local_key = True
         if not selected_key:
             raise RuntimeError(
                 "已配置 API Base URL，但缺少 API Key。请设置 LLM_API_KEY 或在界面中填写。"
@@ -164,14 +209,31 @@ def resolve_llm_config(
             source="explicit key; default xAI URL",
         )
 
+    local = _local_grok_config(selected_model, grok_config_path)
     if local:
         return local
 
-    if env_key:
+    xai_key, xai_key_name = _first_env(XAI_API_KEY_ENV_NAMES)
+    if xai_key:
         return LLMConfig(
-            api_key=env_key,
+            api_key=xai_key,
             base_url=DEFAULT_BASE_URL,
-            source=f"environment ({env_key_name}); default xAI URL",
+            source=f"environment ({xai_key_name}); default xAI URL",
+        )
+
+    openai_key, openai_key_name = _first_env(OPENAI_API_KEY_ENV_NAMES)
+    if openai_key:
+        return LLMConfig(
+            api_key=openai_key,
+            base_url=DEFAULT_OPENAI_BASE_URL,
+            source=f"environment ({openai_key_name}); default OpenAI URL",
+        )
+
+    generic_key, generic_key_name = _first_env(GENERIC_API_KEY_ENV_NAMES)
+    if generic_key:
+        raise RuntimeError(
+            f"已配置 {generic_key_name}，但缺少 LLM_BASE_URL。"
+            "通用 API Key 必须同时指定对应的 Base URL。"
         )
 
     raise RuntimeError(

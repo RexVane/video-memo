@@ -32,7 +32,8 @@ class FrameTests(unittest.TestCase):
             stale.write_bytes(b"stale")
 
             def fake_run(command, **kwargs):
-                (output / "frame_001.jpg").write_bytes(b"frame")
+                pattern = Path(command[-1])
+                (pattern.parent / "frame_001.jpg").write_bytes(b"frame")
                 return SimpleNamespace(returncode=0, stderr="")
 
             run_mock.side_effect = fake_run
@@ -44,6 +45,23 @@ class FrameTests(unittest.TestCase):
             self.assertIn("min(1280,iw)", video_filter)
             self.assertFalse(stale.exists())
             self.assertEqual(result, [output / "frame_001.jpg"])
+
+    @patch("frames.subprocess.run")
+    def test_failed_refresh_preserves_existing_frames(self, run_mock) -> None:
+        run_mock.return_value = SimpleNamespace(returncode=1, stderr="temporary failure")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            video = root / "source.mp4"
+            video.write_bytes(b"video")
+            output = root / "frames"
+            output.mkdir()
+            existing = output / "frame_001.jpg"
+            existing.write_bytes(b"existing")
+
+            with self.assertRaisesRegex(RuntimeError, "temporary failure"):
+                frames.extract_frames(video, output)
+
+            self.assertEqual(existing.read_bytes(), b"existing")
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is required")
     def test_extracts_frames_with_real_ffmpeg(self) -> None:

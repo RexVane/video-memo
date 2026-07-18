@@ -30,4 +30,6 @@ The task dialog separates video links from local media and provides a native fil
 
 The plugin launches Python with `shell: false`, streams structured progress to the status bar, exports the note into the current Vault, and opens the generated note when processing completes.
 
+The cc-switch database view requires an Obsidian/Electron runtime with `node:sqlite`. On older desktop runtimes, the plugin still loads and can use the environment configuration source.
+
 The cc-switch provider workflow and layout are adapted from [CLI-Manager](https://github.com/dark-hxx/CLI-Manager), Copyright (c) 2026 Chenyme, under AGPL-3.0-or-later. See `NOTICE` and `LICENSE`.

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 
@@ -24,9 +26,7 @@ def extract_frames(
     if not video_path.is_file():
         raise FileNotFoundError(f"视频文件不存在: {video_path}")
 
-    out_dir.mkdir(parents=True, exist_ok=True)
-    for old_frame in out_dir.glob("frame_*.jpg"):
-        old_frame.unlink()
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if duration and duration > 0:
         # e.g. 120s, 8 frames -> 1 frame every 15s
@@ -42,23 +42,44 @@ def extract_frames(
     )
     vf = f"{fps_filter},{scale_filter}"
 
-    pattern = str(out_dir / "frame_%03d.jpg")
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(video_path),
-        "-vf",
-        vf,
-        "-q:v",
-        "3",
-        "-frames:v",
-        str(max_frames),
-        pattern,
-    ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if proc.returncode != 0:
-        raise RuntimeError(f"抽帧失败:\n{proc.stderr[-2000:]}")
+    with tempfile.TemporaryDirectory(
+        prefix=f".{out_dir.name}_",
+        dir=out_dir.parent,
+    ) as temporary:
+        temporary_dir = Path(temporary)
+        pattern = str(temporary_dir / "frame_%03d.jpg")
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video_path),
+            "-vf",
+            vf,
+            "-q:v",
+            "3",
+            "-frames:v",
+            str(max_frames),
+            pattern,
+        ]
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(f"抽帧失败:\n{proc.stderr[-2000:]}")
+        generated = sorted(temporary_dir.glob("frame_*.jpg"))[:max_frames]
+        if not generated:
+            raise RuntimeError("抽帧失败：ffmpeg 未生成任何关键帧")
 
-    frames = sorted(out_dir.glob("frame_*.jpg"))
-    return frames[:max_frames]
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for old_frame in out_dir.glob("frame_*.jpg"):
+            old_frame.unlink()
+        frames: list[Path] = []
+        for frame in generated:
+            destination = out_dir / frame.name
+            shutil.move(str(frame), destination)
+            frames.append(destination)
+        return frames

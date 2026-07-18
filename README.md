@@ -24,8 +24,8 @@ Copy-Item .env.example .env
 API 配置有三种方式，优先级从高到低：
 
 1. 在桌面界面填写 Base URL、API Key 和模型。
-2. 使用 `.env` 或系统环境变量：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`。
-3. 自动复用 `~/.grok/config.toml` 中对应模型的 Key 和 Base URL；没有本机 Grok 配置时，`XAI_API_KEY` 默认连接 `https://api.x.ai/v1`。
+2. 使用 `.env` 或系统环境变量：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`。通用 `LLM_API_KEY` 必须与 `LLM_BASE_URL` 同时配置。
+3. 自动复用 `~/.grok/config.toml` 中对应模型的 Key 和 Base URL；没有本机 Grok 配置时，`XAI_API_KEY` 默认连接 `https://api.x.ai/v1`，单独的 `OPENAI_API_KEY` 则连接 OpenAI 官方 API。
 
 自定义 Base URL 会收到所选 API Key，只应使用可信的 HTTPS 服务。系统环境变量不会被写入项目文件。
 
@@ -69,7 +69,7 @@ python src/pipeline.py "URL" --obsidian-vault "D:\Notes\My Vault"
 
 支持的本地格式：视频 `mp4 / mkv / webm / mov / avi / flv / m4v / ts / mpg / mpeg / wmv`，音频 `mp3 / wav / m4a / flac / aac / ogg / opus / wma / amr / aiff`。本地模式不会复制原始媒体文件，只在输出目录生成音轨、转写与总结。
 
-相同来源再次运行时会复用最近一次任务的下载结果和转写，并重新生成报告；修改 Whisper 模型后若要强制重新转写，请删除对应运行目录中的 `transcript.txt`。
+相同来源再次运行时会复用满足当前设置的最近任务，并重新生成报告。本地文件大小或修改时间变化、Whisper 模型或语言变化、以及现有缓存不能满足关键帧要求时，会自动重新处理，不会静默复用不兼容的转写或画面。
 
 ### 常用参数
 
@@ -130,7 +130,7 @@ npm.cmd install
 npm.cmd run build
 ```
 
-构建后运行 `obsidian-plugin/install.ps1 -VaultPath "D:\Notes\My Vault"` 安装必要文件，启用插件后在设置里填写本项目目录。插件仅支持桌面版 Obsidian；Python、ffmpeg、yt-dlp 和模型依赖仍由本项目环境提供。
+构建后运行 `obsidian-plugin/install.ps1 -VaultPath "D:\Notes\My Vault"` 安装必要文件，启用插件后在设置里填写本项目目录。插件仅支持桌面版 Obsidian；Python、ffmpeg、yt-dlp 和模型依赖仍由本项目环境提供。cc-switch 数据库集成需要 Obsidian 内置支持 `node:sqlite`；旧运行时仍可加载插件并切换到“环境配置”。
 
 ## 能力与限制
 

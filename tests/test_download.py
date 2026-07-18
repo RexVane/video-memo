@@ -94,6 +94,18 @@ class DownloadTests(unittest.TestCase):
             ("en-orig", True),
         )
 
+    def test_requested_automatic_track_beats_unrelated_manual_track(self) -> None:
+        info = {
+            "language": "en",
+            "subtitles": {"en": [{"url": "manual"}]},
+            "automatic_captions": {"zh-Hans": [{"url": "auto"}]},
+        }
+
+        self.assertEqual(
+            download._select_subtitle_track(info, "zh"),
+            ("zh-Hans", True),
+        )
+
     def test_cleanup_removes_only_media_inside_run_directory(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

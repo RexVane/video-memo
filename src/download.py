@@ -58,9 +58,12 @@ def load_download_result(work_dir: Path) -> DownloadResult | None:
         return None
 
     def stored_path(value: str | None) -> Path | None:
-        if not value:
+        if not value or not isinstance(value, str):
             return None
-        path = Path(value)
+        try:
+            path = Path(value)
+        except (TypeError, ValueError):
+            return None
         return path if path.is_absolute() else work_dir / path
 
     audio_path = stored_path(info.get("audio_path"))
@@ -81,12 +84,16 @@ def load_download_result(work_dir: Path) -> DownloadResult | None:
     ):
         return None
 
-    duration = info.get("duration")
+    duration_value = info.get("duration")
+    try:
+        duration = float(duration_value) if duration_value is not None else None
+    except (TypeError, ValueError):
+        duration = None
     return DownloadResult(
         video_path=video_path,
         audio_path=audio_path,
         title=info.get("title") or "untitled",
-        duration=float(duration) if duration is not None else None,
+        duration=duration,
         webpage_url=info.get("webpage_url") or "",
         description=info.get("description") or "",
         uploader=info.get("uploader") or "",
@@ -150,22 +157,34 @@ def _select_subtitle_track(
             if code != "live_chat" and isinstance(tracks, list) and tracks
         ]
 
+    manual_codes = available("subtitles")
+    automatic_codes = available("automatic_captions")
+
+    def matching(codes: list[str], preferred: str) -> str | None:
+        matches = [code for code in codes if _language_matches(code, preferred)]
+        return sorted(matches, key=str.casefold)[0] if matches else None
+
     preferences = [preferred_language, info.get("language")]
-    preferences = [str(value) for value in preferences if value]
+    seen_preferences: set[str] = set()
+    for value in preferences:
+        if not value:
+            continue
+        preferred = str(value)
+        normalized = preferred.lower().replace("_", "-")
+        if normalized in seen_preferences:
+            continue
+        seen_preferences.add(normalized)
+        manual = matching(manual_codes, preferred)
+        if manual:
+            return manual, False
+        automatic = matching(automatic_codes, preferred)
+        if automatic:
+            return automatic, True
 
-    def choose(codes: list[str]) -> str | None:
-        for preferred in preferences:
-            for code in codes:
-                if _language_matches(code, preferred):
-                    return code
-        return sorted(codes, key=str.casefold)[0] if codes else None
-
-    manual = choose(available("subtitles"))
-    if manual:
-        return manual, False
-    automatic = choose(available("automatic_captions"))
-    if automatic:
-        return automatic, True
+    if manual_codes:
+        return sorted(manual_codes, key=str.casefold)[0], False
+    if automatic_codes:
+        return sorted(automatic_codes, key=str.casefold)[0], True
     return None
 
 
@@ -320,6 +339,7 @@ def import_local_media(source: Path, work_dir: Path) -> DownloadResult:
         raise ValueError(f"不支持的媒体格式: {source.name}\n支持的扩展名: {supported}")
 
     work_dir.mkdir(parents=True, exist_ok=True)
+    source_stat = source.stat()
     duration = probe_media_duration(source)
     video_path = source if ext in VIDEO_EXTS else None
     audio_path = work_dir / "audio.wav"
@@ -337,6 +357,11 @@ def import_local_media(source: Path, work_dir: Path) -> DownloadResult:
                 "audio_path": str(audio_path),
                 "subtitle_path": None,
                 "subtitle_language": None,
+                "media_has_video": video_path is not None,
+                "source_fingerprint": {
+                    "size": source_stat.st_size,
+                    "mtime_ns": source_stat.st_mtime_ns,
+                },
             },
             ensure_ascii=False,
             indent=2,
@@ -465,6 +490,7 @@ def download(
                 "subtitle_language": (
                     video_info.subtitle_language if subtitle_path else None
                 ),
+                "media_has_video": video_path is not None,
             },
             ensure_ascii=False,
             indent=2,

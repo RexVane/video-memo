@@ -1,13 +1,15 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { requestUrl } from "obsidian";
 import { parse as parseToml } from "smol-toml";
 
 type JsonRecord = Record<string, unknown>;
 
 const SECRET_MARKERS = ["token", "key", "secret", "auth", "password"];
+const SECRET_ASSIGNMENT =
+  /((?:"?[\w.-]*(?:token|key|secret|auth|password)[\w.-]*"?\s*[:=]\s*))(?:(?:"(?:\\.|[^"])*")|(?:'(?:\\.|[^'])*')|(?:[^,\s}\r\n#]+))/gi;
+const BEARER_SECRET = /(bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
 const BASE_URL_KEYS = [
   "OPENAI_BASE_URL",
   "OPENAI_API_BASE",
@@ -109,16 +111,23 @@ function normalizeKey(value: string): string {
   return value.trim().replaceAll("-", "_").toUpperCase();
 }
 
-function keyMatches(
-  key: string,
-  exact: readonly string[],
-  suffixes: readonly string[],
-): boolean {
-  const normalized = normalizeKey(key);
-  return (
-    exact.some((candidate) => normalized === normalizeKey(candidate)) ||
-    suffixes.some((suffix) => normalized.endsWith(normalizeKey(suffix)))
-  );
+function findTextByKeyMatcher(
+  value: unknown,
+  matcher: (key: string) => boolean,
+): string | null {
+  const record = asRecord(value);
+  if (!record) return null;
+  for (const [key, candidate] of Object.entries(record)) {
+    if (matcher(key)) {
+      const text = textValue(candidate);
+      if (text) return text;
+    }
+  }
+  for (const candidate of Object.values(record)) {
+    const nested = findTextByKeyMatcher(candidate, matcher);
+    if (nested) return nested;
+  }
+  return null;
 }
 
 function findTextByKeyPatterns(
@@ -126,19 +135,15 @@ function findTextByKeyPatterns(
   exact: readonly string[],
   suffixes: readonly string[],
 ): string | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  for (const [key, candidate] of Object.entries(record)) {
-    if (keyMatches(key, exact, suffixes)) {
-      const text = textValue(candidate);
-      if (text) return text;
-    }
-  }
-  for (const candidate of Object.values(record)) {
-    const nested = findTextByKeyPatterns(candidate, exact, suffixes);
-    if (nested) return nested;
-  }
-  return null;
+  const normalizedExact = exact.map(normalizeKey);
+  const exactMatch = findTextByKeyMatcher(value, (key) =>
+    normalizedExact.includes(normalizeKey(key)),
+  );
+  if (exactMatch) return exactMatch;
+  const normalizedSuffixes = suffixes.map(normalizeKey);
+  return findTextByKeyMatcher(value, (key) =>
+    normalizedSuffixes.some((suffix) => normalizeKey(key).endsWith(suffix)),
+  );
 }
 
 function isSecretKey(key: string): boolean {
@@ -150,6 +155,12 @@ function maskSecret(value: string): string {
   const characters = [...value];
   if (characters.length <= 12) return "***";
   return `${characters.slice(0, 4).join("")}...${characters.slice(-4).join("")}`;
+}
+
+function redactEmbeddedSecrets(value: string): string {
+  return value
+    .replace(SECRET_ASSIGNMENT, '$1"***"')
+    .replace(BEARER_SECRET, "$1***");
 }
 
 function collectMaskedEnv(config: JsonRecord): Record<string, string> {
@@ -172,6 +183,9 @@ function redactSecrets(value: unknown, parentKey = ""): unknown {
   }
   if (Array.isArray(value)) {
     return value.map((item) => redactSecrets(item));
+  }
+  if (typeof value === "string") {
+    return redactEmbeddedSecrets(value);
   }
   const record = asRecord(value);
   if (!record) return value;
@@ -261,7 +275,8 @@ function parseProviderConfig(settingsConfig: string, metaRaw: string): ParsedPro
       apiFormat: null,
       apiKey: null,
       maskedEnv: {},
-      redactedSettingsConfig: settingsConfig,
+      redactedSettingsConfig:
+        "配置解析失败。为避免泄露 API Key，原始配置已隐藏。",
       parseError: true,
     };
   }
@@ -303,7 +318,20 @@ export function resolveCcSwitchDbPath(configuredPath: string): string {
   return resolve(expanded || defaultCcSwitchDbPath());
 }
 
-function openDatabase(configuredPath: string): { db: DatabaseSync; path: string } {
+function loadNodeSqlite(): typeof import("node:sqlite") {
+  try {
+    return require("node:sqlite") as typeof import("node:sqlite");
+  } catch {
+    throw new Error(
+      "当前 Obsidian 运行时不支持 node:sqlite。请升级 Obsidian，或切换到环境配置。",
+    );
+  }
+}
+
+function openDatabase(configuredPath: string): {
+  db: import("node:sqlite").DatabaseSync;
+  path: string;
+} {
   const path = resolveCcSwitchDbPath(configuredPath);
   if (extname(path).toLowerCase() !== ".db") {
     throw new Error("cc-switch 数据库路径必须指向 .db 文件");
@@ -311,6 +339,7 @@ function openDatabase(configuredPath: string): { db: DatabaseSync; path: string 
   if (!existsSync(path)) {
     throw new Error(`未找到 cc-switch 数据库: ${path}`);
   }
+  const { DatabaseSync } = loadNodeSqlite();
   return {
     db: new DatabaseSync(path, { readOnly: true, timeout: 15_000 }),
     path,

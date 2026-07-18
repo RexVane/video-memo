@@ -57,7 +57,18 @@ def export_to_vault(
     destination.mkdir(parents=True, exist_ok=True)
     source_id = hashlib.sha256(metadata.webpage_url.encode("utf-8")).hexdigest()[:8]
     note_stem = f"{_safe_name(metadata.title)}_{source_id}"
-    note_path = destination / f"{note_stem}.md"
+    preferred_note_path = destination / f"{note_stem}.md"
+    existing_notes = sorted(
+        destination.glob(f"*_{source_id}.md"),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    note_path = (
+        preferred_note_path
+        if preferred_note_path.is_file() or not existing_notes
+        else existing_notes[0]
+    )
+    note_stem = note_path.stem
 
     frame_links: list[str] = []
     source_frames = sorted(summary_path.parent.glob("frames/frame_*.jpg"))
