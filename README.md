@@ -1,8 +1,8 @@
-# Video Summarizer — 视频 / 录音总结
+# VideoMemo — 视频 / 录音总结
 
 给它一个视频链接，或一个本地视频 / 录音文件，程序会：
 
-1. **下载** 视频（`yt-dlp`，支持 YouTube、B 站等）；本地文件直接使用，跳过下载
+1. **下载** 视频（由 `yt-dlp` 解析 YouTube、B 站等站点；已解析的普通 HTTP 直链会自动尝试多连接 Range 传输）；本地文件直接使用，跳过下载
 2. **听** 优先读取平台字幕；没有可用字幕时提取音轨并用 **Whisper** 本地转写
 3. **看** 均匀抽取关键帧（可选；纯音频输入自动跳过）
 4. **总结** 调用支持图片输入的 **OpenAI 兼容 API** 生成中文结构化摘要
@@ -29,7 +29,9 @@ API 配置有三种方式，优先级从高到低：
 
 自定义 Base URL 会收到所选 API Key，只应使用可信的 HTTPS 服务。系统环境变量不会被写入项目文件。
 
-首次运行 Whisper 会自动下载模型权重（`base` 约 140MB）。
+两个可选环境变量：`LLM_API_FORMAT` 选择 API 线格式，默认 Chat Completions，设为 `responses` 时改用 OpenAI Responses API；`LLM_NOTES_MODEL` 指定长转写分章笔记使用的模型，默认与主模型相同。
+
+首次运行 Whisper 会自动把模型权重下载到项目内的 `models/faster-whisper/`（`base` 约 140MB）。该目录不提交到 Git；需要改用其他位置时可设置 `WHISPER_MODEL_DIR`，相对路径按项目根目录解析。
 
 ## 桌面程序（推荐）
 
@@ -84,7 +86,7 @@ python src/pipeline.py "URL" --obsidian-vault "D:\Notes\My Vault"
 | `--api-base-url URL` | 临时覆盖 OpenAI 兼容 API 根地址 |
 | `--regenerate DIR` | 从已有运行目录重新生成报告，不重复下载和转写 |
 | `--obsidian-vault DIR` | 将报告与关键帧导出到 Obsidian Vault |
-| `--obsidian-folder DIR` | Vault 内目标文件夹，默认 `Video Summaries` |
+| `--obsidian-folder DIR` | Vault 内目标文件夹，默认 `Video Memos` |
 | `-o output` | 输出根目录 |
 
 ### 示例
@@ -120,7 +122,7 @@ python src/pipeline.py "URL" --api-base-url "https://api.example.com/v1" --llm-m
 
 ## Obsidian 桌面插件
 
-`obsidian-plugin/` 提供桌面版薄壳插件。它将链接与本地文件分为两个输入模式，提供系统文件选择器，并通过子进程调用本项目的 Python 引擎。插件设置首页将供应商、项目目录和 Python 路径等选项放在同一栏目；点击供应商后进入 cc-switch 数据库与供应商列表，再点击具体供应商查看详情。模型下拉框会使用该供应商的 Base URL 和 Key 实时读取 OpenAI 兼容 `/models` 接口，失败时回退到本地配置模型。密钥只在请求或任务启动时读入内存，不写入插件配置。运行时会在状态栏显示进度，支持取消和重新生成，并在完成后自动打开导出的笔记。
+`obsidian-plugin/` 提供桌面版薄壳插件。它将链接与本地文件分为两个输入模式，提供系统文件选择器，并通过子进程调用本项目的 Python 引擎。任务弹窗顶部会显示本次将使用的供应商与模型。插件设置首页将供应商、项目目录和 Python 路径等选项放在同一栏目；点击供应商后进入 cc-switch 数据库与供应商列表，再点击具体供应商查看详情（原始配置默认折叠）。模型下拉框会使用该供应商的 Base URL 和 Key 实时读取 OpenAI 兼容 `/models` 接口，失败时回退到本地配置模型。密钥只在请求或任务启动时读入内存，不写入插件配置。运行时会弹出进度面板（进度条、实时日志、取消、后台运行），点击状态栏可随时重新打开；失败时面板展示可复制的错误详情，完成后自动打开导出的笔记。
 
 插件的 cc-switch 供应商交互、解析逻辑与布局改编自 [CLI-Manager](https://github.com/dark-hxx/CLI-Manager)，Copyright (c) 2026 Chenyme，依据 AGPL-3.0-or-later 使用。详见 `obsidian-plugin/NOTICE` 与 `obsidian-plugin/LICENSE`。
 
@@ -144,6 +146,7 @@ npm.cmd run build
 需要登录才能看的视频，可自行给 `yt-dlp` 配置 cookies（见 [yt-dlp 文档](https://github.com/yt-dlp/yt-dlp)）。
 即使选择了浏览器 Cookie，程序也会先匿名访问；公开视频不会读取浏览器数据库。只有匿名访问失败时才读取 Cookie，从而避开 Chrome 数据库锁定问题。
 长转写会拆成多个连续章节，并行生成详细学习笔记后再综合，因此会产生多次模型请求。关键帧最长边会压缩到 1280 像素，以控制上传体积。
+在线视频默认选择不超过 1080p 的画质。`yt-dlp` 仍负责站点解析、格式选择、字幕、Cookie 以及 HLS/DASH 等分片媒体；当它返回安全的普通 HTTP/HTTPS 直链时，程序会先尝试最多 4 路 Range 传输，严格校验响应并在完成后原子提交。服务器不支持 Range、需要认证、响应不可信或高速传输失败时，会自动回退到完整的 `yt-dlp` 下载，不会丢失字幕或元数据。高速传输只在无 Cookie 参数时启用，临时分段文件会在失败或取消时清理。瞬时媒体网络错误（408、429、5xx 等）会有限重试；LLM API 错误也会按总结模块策略重试，二者相互独立。
 
 ## 开发验证
 
@@ -156,7 +159,8 @@ npm.cmd run build
 
 ```
 URL / 本地媒体
- ├─ 平台字幕 → transcript
+ ├─ yt-dlp 解析/字幕/分片下载
+ │       └─ 普通 HTTP 直链 → Range 多连接传输（失败回退 yt-dlp）
  └─ 无字幕时：ffmpeg → audio.wav → faster-whisper → transcript
                     ├─ ffmpeg → frames/*.jpg
                     └─ OpenAI-compatible LLM → summary.md

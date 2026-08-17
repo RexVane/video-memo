@@ -46,10 +46,10 @@ LLM_MODELS = [
 LLM_DEFAULT = default_model()
 
 
-class VideoSummarizerApp(ctk.CTk):
+class VideoMemoApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("视频总结助手 — Video Summarizer")
+        self.title("VideoMemo — 视频学习笔记")
         self.geometry("920x850")
         self.minsize(800, 680)
 
@@ -58,8 +58,10 @@ class VideoSummarizerApp(ctk.CTk):
 
         self._msg_q: queue.Queue = queue.Queue()
         self._worker: threading.Thread | None = None
+        self._cancel_event: threading.Event | None = None
         self._last_summary_path: Path | None = None
         self._busy = False
+        self._closing = False
         try:
             self._initial_llm_config: LLMConfig | None = resolve_llm_config(LLM_DEFAULT)
         except (RuntimeError, ValueError):
@@ -100,7 +102,7 @@ class VideoSummarizerApp(ctk.CTk):
         header.pack(fill="x", **pad)
         ctk.CTkLabel(
             header,
-            text="视频总结助手",
+            text="VideoMemo",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).pack(anchor="w")
         ctk.CTkLabel(
@@ -218,7 +220,7 @@ class VideoSummarizerApp(ctk.CTk):
         ctk.CTkEntry(
             vault_input,
             textvariable=self.obsidian_vault_var,
-            placeholder_text="选择 Vault 后，笔记会导出到 Video Summaries",
+            placeholder_text="选择 Vault 后，笔记会导出到 Video Memos",
         ).pack(side="left", fill="x", expand=True)
         ctk.CTkButton(
             vault_input,
@@ -365,6 +367,8 @@ class VideoSummarizerApp(ctk.CTk):
             max_frames = 8
 
         self._busy = True
+        cancel_event = threading.Event()
+        self._cancel_event = cancel_event
         self.start_btn.configure(state="disabled", text="处理中…")
         self.regenerate_btn.configure(state="disabled")
         self.copy_btn.configure(state="disabled")
@@ -396,6 +400,7 @@ class VideoSummarizerApp(ctk.CTk):
                     cleanup_media=cleanup_media,
                     obsidian_vault=obsidian_vault,
                     on_progress=on_progress,
+                    cancel_event=cancel_event,
                 )
                 text = path.read_text(encoding="utf-8")
                 self._msg_q.put(("done", path, text))
@@ -436,6 +441,8 @@ class VideoSummarizerApp(ctk.CTk):
             return
 
         self._busy = True
+        cancel_event = threading.Event()
+        self._cancel_event = cancel_event
         self.start_btn.configure(state="disabled")
         self.regenerate_btn.configure(state="disabled", text="生成中…")
         self.copy_btn.configure(state="disabled")
@@ -454,6 +461,7 @@ class VideoSummarizerApp(ctk.CTk):
                     on_progress=lambda msg, pct: self._msg_q.put(
                         ("progress", msg, pct)
                     ),
+                    cancel_event=cancel_event,
                 )
                 text = path.read_text(encoding="utf-8")
                 self._msg_q.put(("done", path, text))
@@ -486,6 +494,7 @@ class VideoSummarizerApp(ctk.CTk):
                     self.status_var.set(f"完成：{path}")
                     self._log(f"完成: {path}")
                     self._busy = False
+                    self._cancel_event = None
                     self.start_btn.configure(state="normal", text="开始总结")
                     self.regenerate_btn.configure(state="normal", text="重新生成")
                     self.copy_btn.configure(state="normal")
@@ -494,12 +503,21 @@ class VideoSummarizerApp(ctk.CTk):
                     self._set_summary(f"出错了：\n\n{err}\n")
                     self._log(tb or err)
                     self.progress.set(0)
-                    self.status_var.set("失败，请看「运行日志」或总结页错误信息")
+                    self.status_var.set(
+                        "已取消"
+                        if self._closing and "已取消" in err
+                        else "失败，请看「运行日志」或总结页错误信息"
+                    )
                     self._busy = False
+                    self._cancel_event = None
                     self.start_btn.configure(state="normal", text="开始总结")
                     self.regenerate_btn.configure(state="normal", text="重新生成")
+                    self.copy_btn.configure(state="normal")
         except queue.Empty:
             pass
+        if self._closing and not self._worker_alive():
+            self.destroy()
+            return
         self.after(120, self._drain_queue)
 
     def _open_output(self) -> None:
@@ -524,12 +542,30 @@ class VideoSummarizerApp(ctk.CTk):
         self.status_var.set("已复制总结到剪贴板")
 
     def _on_close(self) -> None:
-        self.destroy()
+        if not self._busy:
+            self.destroy()
+            return
+        self._closing = True
+        if self._cancel_event:
+            self._cancel_event.set()
+        self.status_var.set("正在取消任务，等待后台进程退出…")
+        self.start_btn.configure(state="disabled", text="取消中…")
+        self.regenerate_btn.configure(state="disabled", text="取消中…")
+        self.after(100, self._close_when_idle)
+
+    def _worker_alive(self) -> bool:
+        return self._worker is not None and self._worker.is_alive()
+
+    def _close_when_idle(self) -> None:
+        if not self._worker_alive():
+            self.destroy()
+            return
+        self.after(100, self._close_when_idle)
 
 
 def main(argv: list[str] | None = None) -> None:
     args = sys.argv[1:] if argv is None else argv
-    app = VideoSummarizerApp()
+    app = VideoMemoApp()
     if args:
         app.url_var.set(args[0])
     if "--auto-start" in args[1:]:

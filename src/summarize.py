@@ -6,17 +6,30 @@ import base64
 import math
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
-from openai import APIStatusError, OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI
 
+from cancellation import CancellationSignal, check_cancelled
 from llm_config import resolve_llm_config
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 DETAILED_CHUNK_SIZE = 6_500
 MAX_DETAILED_CHUNKS = 12
+MAX_API_ATTEMPTS = 3
+RETRY_DELAYS = (2.0, 5.0)
+RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+API_ERROR_MESSAGES = {
+    401: "API 认证失败，请检查 API Key 是否与 Base URL 匹配。",
+    402: (
+        "API 额度不足或订阅不可用。完整转写已经保留；充值、升级订阅或切换"
+        "其它 OpenAI 兼容 API 后，可直接重新生成报告。"
+    ),
+    429: "API 请求过于频繁或已达到速率限制，请稍后重试。",
+}
 SummaryProgressCb = Callable[[str, float], None]
 
 
@@ -137,24 +150,49 @@ def _responses_completion(client: OpenAI, **kwargs) -> str:
     return getattr(response, "output_text", "") or ""
 
 
-def _chat_completion(client: OpenAI, **kwargs):
-    try:
-        if _uses_responses_api():
-            return _responses_completion(client, **kwargs)
-        return client.chat.completions.create(**kwargs)
-    except APIStatusError as error:
-        messages = {
-            401: "API 认证失败，请检查 API Key 是否与 Base URL 匹配。",
-            402: (
-                "API 额度不足或订阅不可用。完整转写已经保留；充值、升级订阅或切换"
-                "其它 OpenAI 兼容 API 后，可直接重新生成报告。"
-            ),
-            429: "API 请求过于频繁或已达到速率限制，请稍后重试。",
-        }
-        message = messages.get(error.status_code)
-        if message:
-            raise RuntimeError(message) from error
-        raise
+def _wait_before_retry(
+    attempt: int,
+    cancel_event: CancellationSignal | None = None,
+) -> None:
+    delay = RETRY_DELAYS[min(attempt - 1, len(RETRY_DELAYS) - 1)]
+    deadline = time.monotonic() + delay
+    while time.monotonic() < deadline:
+        check_cancelled(cancel_event)
+        time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
+
+
+def _chat_completion(
+    client: OpenAI,
+    *,
+    cancel_event: CancellationSignal | None = None,
+    **kwargs,
+):
+    """Call the API, retrying transient failures (rate limits, 5xx, network)."""
+    for attempt in range(1, MAX_API_ATTEMPTS + 1):
+        check_cancelled(cancel_event)
+        try:
+            if _uses_responses_api():
+                return _responses_completion(client, **kwargs)
+            return client.chat.completions.create(**kwargs)
+        except APIConnectionError as error:
+            if attempt == MAX_API_ATTEMPTS:
+                raise RuntimeError(
+                    f"无法连接 AI 服务，已自动重试 {MAX_API_ATTEMPTS} 次仍失败。"
+                    "请检查网络或 Base URL 后重试。"
+                ) from error
+        except APIStatusError as error:
+            retryable = error.status_code in RETRYABLE_STATUS_CODES
+            if not retryable or attempt == MAX_API_ATTEMPTS:
+                message = API_ERROR_MESSAGES.get(error.status_code)
+                if message:
+                    raise RuntimeError(message) from error
+                if retryable:
+                    raise RuntimeError(
+                        f"AI 服务暂时不可用（HTTP {error.status_code}），"
+                        f"已自动重试 {MAX_API_ATTEMPTS} 次仍失败，请稍后重试。"
+                    ) from error
+                raise
+        _wait_before_retry(attempt, cancel_event)
 
 
 def _timestamp_bounds(chunk: str) -> tuple[str, str]:
@@ -186,7 +224,9 @@ def _generate_chapter_notes(
     transcript: str,
     model: str,
     on_progress: SummaryProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> list[str]:
+    check_cancelled(cancel_event)
     if not transcript.strip():
         return []
 
@@ -206,9 +246,11 @@ def _generate_chapter_notes(
     )
 
     def generate_one(index: int, chunk: str) -> tuple[int, str]:
+        check_cancelled(cancel_event)
         start, end = _timestamp_bounds(chunk)
         response = _chat_completion(
             client,
+            cancel_event=cancel_event,
             model=notes_model,
             messages=[
                 {"role": "system", "content": system},
@@ -252,6 +294,7 @@ def _generate_chapter_notes(
         ]
         completed = 0
         for future in as_completed(futures):
+            check_cancelled(cancel_event)
             note_index, note = future.result()
             notes[note_index] = note
             completed += 1
@@ -276,11 +319,13 @@ def summarize(
     api_key: str | None = None,
     base_url: str | None = None,
     on_progress: SummaryProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> str:
     """
     Build scan-first knowledge notes from transcript and optional key frames.
     """
     client = _client(model, api_key=api_key, base_url=base_url)
+    check_cancelled(cancel_event)
     frames = frame_paths or []
     chapter_notes = _generate_chapter_notes(
         client,
@@ -288,6 +333,7 @@ def summarize(
         transcript=transcript,
         model=model,
         on_progress=on_progress,
+        cancel_event=cancel_event,
     )
     detailed_material = (
         "\n\n".join(chapter_notes)
@@ -397,9 +443,13 @@ flowchart LR
 
     if on_progress:
         on_progress("提炼一眼看懂、知识脉络和核心知识", 0.86)
+    check_cancelled(cancel_event)
 
     content: list[dict] = [{"type": "text", "text": user_text}]
-    for fp in frames[:12]:
+    # The pipeline already limits this list to the requested max_frames.
+    # Do not silently drop frames here: doing so made --max-frames misleading
+    # and caused cache metadata to disagree with what the model received.
+    for fp in frames:
         b64 = _b64_image(fp)
         content.append(
             {
@@ -410,6 +460,7 @@ flowchart LR
 
     resp = _chat_completion(
         client,
+        cancel_event=cancel_event,
         model=model,
         messages=[
             {"role": "system", "content": system},

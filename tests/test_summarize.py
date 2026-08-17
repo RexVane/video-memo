@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import httpx
+
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 import summarize  # noqa: E402
+
+
+def _status_error(status_code: int) -> summarize.APIStatusError:
+    request = httpx.Request("POST", "https://api.test/v1/chat/completions")
+    response = httpx.Response(status_code=status_code, request=request)
+    return summarize.APIStatusError("boom", response=response, body=None)
 
 
 class SummarizeTests(unittest.TestCase):
@@ -33,6 +42,40 @@ class SummarizeTests(unittest.TestCase):
 
         self.assertEqual("".join(chunks), text)
         self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
+
+    @patch("summarize._b64_image", side_effect=lambda path: path.stem)
+    @patch("summarize._chat_completion")
+    @patch("summarize._client")
+    def test_summary_uploads_all_requested_frames(
+        self,
+        client_factory,
+        chat_mock,
+        _b64_mock,
+    ) -> None:
+        client_factory.return_value = MagicMock()
+        chat_mock.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="summary"))]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            frames = [Path(tmp) / f"frame_{index:03d}.jpg" for index in range(13)]
+            result = summarize.summarize(
+                title="Course",
+                url="https://example.test/course",
+                uploader="Teacher",
+                description="",
+                transcript="",
+                frame_paths=frames,
+                model="test-model",
+            )
+
+        self.assertEqual(result, "summary")
+        content = chat_mock.call_args.kwargs["messages"][1]["content"]
+        self.assertEqual(len(content), 14)
+        self.assertEqual(
+            [item["type"] for item in content[1:]],
+            ["image_url"] * 13,
+        )
 
     def test_timestamp_bounds_supports_short_and_hour_timestamps(self) -> None:
         self.assertEqual(
@@ -92,6 +135,68 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(request["input"][0]["content"][0]["type"], "input_text")
         self.assertEqual(request["input"][0]["content"][1]["type"], "input_image")
         self.assertNotIn("temperature", request)
+
+    def test_chat_completion_retries_transient_errors_then_succeeds(self) -> None:
+        client = MagicMock()
+        success = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+        client.chat.completions.create.side_effect = [
+            _status_error(503),
+            _status_error(429),
+            success,
+        ]
+
+        with patch.dict(os.environ, {"LLM_API_FORMAT": ""}), patch.object(
+            summarize, "RETRY_DELAYS", (0.0,)
+        ):
+            response = summarize._chat_completion(client, model="m", messages=[])
+
+        self.assertIs(response, success)
+        self.assertEqual(client.chat.completions.create.call_count, 3)
+
+    def test_chat_completion_maps_exhausted_rate_limit_to_friendly_error(self) -> None:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = _status_error(429)
+
+        with patch.dict(os.environ, {"LLM_API_FORMAT": ""}), patch.object(
+            summarize, "RETRY_DELAYS", (0.0,)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "速率限制"):
+                summarize._chat_completion(client, model="m", messages=[])
+
+        self.assertEqual(
+            client.chat.completions.create.call_count,
+            summarize.MAX_API_ATTEMPTS,
+        )
+
+    def test_chat_completion_does_not_retry_auth_errors(self) -> None:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = _status_error(401)
+
+        with patch.dict(os.environ, {"LLM_API_FORMAT": ""}):
+            with self.assertRaisesRegex(RuntimeError, "认证失败"):
+                summarize._chat_completion(client, model="m", messages=[])
+
+        self.assertEqual(client.chat.completions.create.call_count, 1)
+
+    def test_chat_completion_retries_connection_errors(self) -> None:
+        request = httpx.Request("POST", "https://api.test/v1/chat/completions")
+        client = MagicMock()
+        client.chat.completions.create.side_effect = summarize.APIConnectionError(
+            request=request
+        )
+
+        with patch.dict(os.environ, {"LLM_API_FORMAT": ""}), patch.object(
+            summarize, "RETRY_DELAYS", (0.0,)
+        ):
+            with self.assertRaisesRegex(RuntimeError, "无法连接"):
+                summarize._chat_completion(client, model="m", messages=[])
+
+        self.assertEqual(
+            client.chat.completions.create.call_count,
+            summarize.MAX_API_ATTEMPTS,
+        )
 
     def test_detailed_notes_cover_every_chunk(self) -> None:
         client = MagicMock()

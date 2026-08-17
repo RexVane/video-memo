@@ -146,6 +146,38 @@ class PipelineTests(unittest.TestCase):
 
             self.assertIsNotNone(reusable)
             self.assertEqual(reusable[0], work)
+            self.assertIsNone(
+                pipeline._find_reusable_download(
+                    root, "https://example.test/v?id=1"
+                )
+            )
+
+    def test_find_reusable_download_rejects_in_progress_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "in-progress"
+            work.mkdir()
+            audio = work / "audio.wav"
+            audio.write_bytes(b"RIFF" + (b"0" * 64))
+            (work / "info.json").write_text(
+                json.dumps(
+                    {
+                        "title": "Course",
+                        "webpage_url": "https://example.test/v?id=2",
+                        "video_path": None,
+                        "audio_path": str(audio),
+                        "run_status": "running",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (work / "summary.md").write_text("old", encoding="utf-8")
+
+            self.assertIsNone(
+                pipeline._find_reusable_download(
+                    root, "https://example.test/v?id=2"
+                )
+            )
 
     def test_local_cache_is_rejected_after_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -303,7 +335,7 @@ class PipelineTests(unittest.TestCase):
             llm_model="test-model",
             api_base_url=None,
             obsidian_vault=None,
-            obsidian_folder="Video Summaries",
+            obsidian_folder="Video Memos",
             on_progress=None,
         )
 
@@ -397,6 +429,21 @@ class PipelineTests(unittest.TestCase):
             video = work_dir / "source.mp4"
             audio.write_bytes(b"audio")
             video.write_bytes(b"video")
+            (work_dir / "info.json").write_text(
+                json.dumps(
+                    {
+                        "title": metadata.title,
+                        "duration": metadata.duration,
+                        "webpage_url": metadata.webpage_url,
+                        "description": metadata.description,
+                        "uploader": metadata.uploader,
+                        "video_path": str(video),
+                        "audio_path": str(audio),
+                        "media_has_video": True,
+                    }
+                ),
+                encoding="utf-8",
+            )
             self.assertIs(kwargs["metadata"], metadata)
             return DownloadResult(
                 video_path=video,
@@ -439,6 +486,10 @@ class PipelineTests(unittest.TestCase):
             self.assertNotIn("# 完整语音转写记录", summary)
             self.assertEqual(summary_path.name, "summary.md")
             self.assertTrue((summary_path.parent / "transcript.txt").is_file())
+            info = json.loads(
+                (summary_path.parent / "info.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(info["run_status"], "complete")
 
     def test_run_with_local_file_skips_probe_and_download(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

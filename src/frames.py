@@ -7,6 +7,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from cancellation import CancellationSignal, run_command
+
 
 def extract_frames(
     video_path: Path,
@@ -14,6 +16,7 @@ def extract_frames(
     max_frames: int = 8,
     duration: float | None = None,
     max_edge: int = 1280,
+    cancel_event: CancellationSignal | None = None,
 ) -> list[Path]:
     """
     Sample up to max_frames evenly across the video.
@@ -61,8 +64,10 @@ def extract_frames(
             str(max_frames),
             pattern,
         ]
-        proc = subprocess.run(
+        proc = run_command(
             cmd,
+            cancel_event=cancel_event,
+            run=subprocess.run,
             capture_output=True,
             text=True,
             encoding="utf-8",

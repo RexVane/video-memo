@@ -90,6 +90,7 @@ export class CcSwitchProviderSettingsView {
   private selectedAppType = "codex";
   private selectedProviderId = "";
   private configTab: "parsed" | "raw" = "parsed";
+  private rawDetailExpanded = false;
   private readonly providerModelStates = new Map<string, ProviderModelState>();
   private modelRequestId = 0;
 
@@ -100,6 +101,7 @@ export class CcSwitchProviderSettingsView {
   showProviderList(): void {
     this.selectedProviderId = "";
     this.configTab = "parsed";
+    this.rawDetailExpanded = false;
   }
 
   render(parent: HTMLElement): boolean {
@@ -145,7 +147,7 @@ export class CcSwitchProviderSettingsView {
     const headingCopy = heading.createDiv();
     headingCopy.createEl("h2", { text: "供应商 (cc-switch)" });
     headingCopy.createEl("p", {
-      text: "只读解析本机 cc-switch 数据库，选择视频总结任务使用的 API 供应商。",
+      text: "只读解析本机 cc-switch 数据库，选择 VideoMemo 任务使用的 API 供应商。",
     });
     const sourceSwitch = heading.createDiv({
       cls: "ccswitch-source-switch",
@@ -350,8 +352,9 @@ export class CcSwitchProviderSettingsView {
     provider: CcSwitchProvider,
     settings: CcSwitchUiSettings,
   ): void {
+    const active = this.isProviderActive(provider, settings);
     const row = parent.createEl("button", {
-      cls: "ccswitch-provider-row",
+      cls: `ccswitch-provider-row${active ? " is-active" : ""}`,
       attr: { type: "button", "aria-label": `查看 ${provider.name} 配置` },
     });
     const tile = row.createDiv({ cls: "ccswitch-provider-icon" });
@@ -360,12 +363,13 @@ export class CcSwitchProviderSettingsView {
     copy.createDiv({ cls: "ccswitch-provider-name", text: provider.name });
     copy.createDiv({ cls: "ccswitch-provider-subtitle", text: providerSubtitle(provider) });
     const trailing = row.createDiv({ cls: "ccswitch-provider-trailing" });
-    if (this.isProviderActive(provider, settings)) badge(trailing, "使用中", "accent");
+    if (active) badge(trailing, "使用中", "accent");
     else if (provider.isCurrent) badge(trailing, "全局当前", "neutral");
     icon(trailing, "chevron-right");
     row.addEventListener("click", () => {
       this.selectedProviderId = provider.id;
       this.configTab = "parsed";
+      this.rawDetailExpanded = false;
       this.providerModelStates.delete(this.providerModelKey(provider));
       this.options.rerender();
     });
@@ -439,6 +443,21 @@ export class CcSwitchProviderSettingsView {
     metadataField(metadata, "Base URL", provider.baseUrl, "link-2");
     metadataField(metadata, "模型", provider.model, "cpu");
     metadataField(metadata, "API 格式", provider.apiFormat, "braces");
+
+    const rawToggle = parent.createEl("button", {
+      cls: "ccswitch-raw-toggle",
+      attr: {
+        type: "button",
+        "aria-expanded": String(this.rawDetailExpanded),
+      },
+    });
+    icon(rawToggle, this.rawDetailExpanded ? "chevron-down" : "chevron-right");
+    rawToggle.createSpan({ text: "查看原始配置（已脱敏）" });
+    rawToggle.addEventListener("click", () => {
+      this.rawDetailExpanded = !this.rawDetailExpanded;
+      this.options.rerender();
+    });
+    if (!this.rawDetailExpanded) return;
 
     const envSection = parent.createDiv({ cls: "ccswitch-detail-section" });
     const envTitle = envSection.createDiv({ cls: "ccswitch-section-title" });

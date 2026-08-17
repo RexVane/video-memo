@@ -19,14 +19,14 @@ var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: tru
 // src/main.ts
 var main_exports = {};
 __export(main_exports, {
-  default: () => VideoSummarizerPlugin
+  default: () => VideoMemoPlugin
 });
 module.exports = __toCommonJS(main_exports);
 var import_node_child_process = require("node:child_process");
 var import_node_fs2 = require("node:fs");
 var import_node_readline = require("node:readline");
 var import_node_path2 = require("node:path");
-var import_obsidian3 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/ccswitch.ts
 var import_node_fs = require("node:fs");
@@ -1069,11 +1069,234 @@ async function fetchCcSwitchProviderModels(options) {
   }
 }
 
-// src/ccswitch-settings.ts
+// src/run-progress.ts
 var import_obsidian2 = require("obsidian");
+var STATUS_KICKER = {
+  running: "\u6B63\u5728\u5904\u7406",
+  success: "\u5DF2\u5B8C\u6210",
+  error: "\u5904\u7406\u5931\u8D25",
+  cancelled: "\u5DF2\u53D6\u6D88"
+};
+var STATUS_BADGE = {
+  running: "",
+  success: "\u2713 \u5B8C\u6210",
+  error: "\u2717 \u5931\u8D25",
+  cancelled: "\u5DF2\u53D6\u6D88"
+};
+var RunProgressModal = class extends import_obsidian2.Modal {
+  options;
+  kickerEl = null;
+  fillEl = null;
+  percentEl = null;
+  statusBadgeEl = null;
+  stageEl = null;
+  logEl = null;
+  errorContainerEl = null;
+  footerEl = null;
+  renderedLogCount = 0;
+  renderedStatus = null;
+  constructor(app, options) {
+    super(app);
+    this.options = options;
+  }
+  onOpen() {
+    this.modalEl.addClass("video-memo-shell");
+    this.contentEl.addClass(
+      "video-memo-modal",
+      "video-memo-progress-modal"
+    );
+    const state = this.options.state;
+    const titleRow = this.contentEl.createDiv({
+      cls: "video-memo-title-row"
+    });
+    const titleCopy = titleRow.createDiv({ cls: "video-memo-title-copy" });
+    this.kickerEl = titleCopy.createDiv({ cls: "video-memo-modal-kicker" });
+    titleCopy.createEl("h2", {
+      cls: "video-memo-progress-source",
+      text: state.source,
+      attr: { title: state.source }
+    });
+    titleCopy.createDiv({
+      cls: "video-memo-modal-subtitle",
+      text: state.providerLabel
+    });
+    const block = this.contentEl.createDiv({
+      cls: "video-memo-progress-block"
+    });
+    const track = block.createDiv({ cls: "video-memo-progress-track" });
+    this.fillEl = track.createDiv({ cls: "video-memo-progress-fill" });
+    const meta = block.createDiv({ cls: "video-memo-progress-meta" });
+    this.percentEl = meta.createSpan({ cls: "video-memo-progress-percent" });
+    this.statusBadgeEl = meta.createSpan({ cls: "video-memo-progress-status" });
+    this.stageEl = this.contentEl.createDiv({
+      cls: "video-memo-progress-stage"
+    });
+    this.logEl = this.contentEl.createDiv({
+      cls: "video-memo-progress-log",
+      attr: { "aria-label": "\u8FD0\u884C\u65E5\u5FD7" }
+    });
+    this.errorContainerEl = this.contentEl.createDiv();
+    this.footerEl = this.contentEl.createDiv({
+      cls: "video-memo-progress-footer"
+    });
+    this.refresh();
+  }
+  refresh() {
+    const state = this.options.state;
+    if (!this.fillEl || !this.percentEl || !this.statusBadgeEl || !this.kickerEl || !this.stageEl || !this.logEl) {
+      return;
+    }
+    this.kickerEl.setText(STATUS_KICKER[state.status]);
+    const percent = Math.round(Math.max(0, Math.min(1, state.progress)) * 100);
+    this.fillEl.style.width = `${percent}%`;
+    this.fillEl.toggleClass("is-success", state.status === "success");
+    this.fillEl.toggleClass("is-error", state.status === "error");
+    this.fillEl.toggleClass("is-cancelled", state.status === "cancelled");
+    this.percentEl.setText(`${percent}%`);
+    this.statusBadgeEl.setText(STATUS_BADGE[state.status]);
+    this.statusBadgeEl.toggleClass("is-success", state.status === "success");
+    this.statusBadgeEl.toggleClass("is-error", state.status === "error");
+    this.stageEl.setText(state.stage || "\u5904\u7406\u4E2D\u2026");
+    this.appendNewLogLines(state);
+    if (this.renderedStatus !== state.status) {
+      this.renderedStatus = state.status;
+      this.renderErrorBox(state);
+      this.renderFooter(state);
+    }
+  }
+  appendNewLogLines(state) {
+    const logEl = this.logEl;
+    if (!logEl) return;
+    if (this.renderedLogCount > state.log.length) {
+      logEl.empty();
+      this.renderedLogCount = 0;
+    }
+    if (this.renderedLogCount === state.log.length) return;
+    const nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 48;
+    for (const line of state.log.slice(this.renderedLogCount)) {
+      logEl.createDiv({ cls: "video-memo-progress-log-line", text: line });
+    }
+    this.renderedLogCount = state.log.length;
+    if (nearBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+  renderErrorBox(state) {
+    const container = this.errorContainerEl;
+    if (!container) return;
+    container.empty();
+    if (state.status !== "error" || !state.errorDetail.trim()) return;
+    const box = container.createDiv({ cls: "video-memo-progress-error" });
+    const head = box.createDiv({ cls: "video-memo-progress-error-head" });
+    head.createSpan({ text: "\u9519\u8BEF\u8BE6\u60C5" });
+    const copyButton = head.createEl("button", {
+      cls: "clickable-icon",
+      attr: { type: "button", "aria-label": "\u590D\u5236\u9519\u8BEF\u4FE1\u606F" }
+    });
+    (0, import_obsidian2.setIcon)(copyButton, "copy");
+    copyButton.addEventListener("click", () => {
+      void navigator.clipboard.writeText(state.errorDetail).then(() => new import_obsidian2.Notice("\u9519\u8BEF\u4FE1\u606F\u5DF2\u590D\u5236"));
+    });
+    box.createEl("pre", { text: state.errorDetail.trim() });
+  }
+  renderFooter(state) {
+    const footer = this.footerEl;
+    if (!footer) return;
+    footer.empty();
+    const addButton = (label, onClick, variant = "") => {
+      const button = footer.createEl("button", {
+        text: label,
+        attr: { type: "button" }
+      });
+      if (variant === "cta") button.addClass("mod-cta");
+      if (variant === "warning") button.addClass("mod-warning");
+      button.addEventListener("click", onClick);
+      return button;
+    };
+    if (state.status === "running") {
+      addButton("\u540E\u53F0\u8FD0\u884C", () => this.close());
+      addButton("\u53D6\u6D88\u4EFB\u52A1", () => this.options.onCancel(), "warning");
+      return;
+    }
+    if (state.status === "success" && state.notePath) {
+      addButton("\u5173\u95ED", () => this.close());
+      addButton(
+        "\u6253\u5F00\u7B14\u8BB0",
+        () => {
+          this.options.onOpenNote();
+          this.close();
+        },
+        "cta"
+      );
+      return;
+    }
+    addButton("\u5173\u95ED", () => this.close(), state.status === "success" ? "cta" : "");
+  }
+  onClose() {
+    this.contentEl.empty();
+    this.options.onClosed();
+  }
+};
+
+// src/settings.ts
+var DEFAULT_SETTINGS = {
+  projectPath: "",
+  pythonPath: "",
+  providerSource: "ccswitch",
+  ccSwitchDbPath: "",
+  ccSwitchAppType: "codex",
+  ccSwitchFollowCurrent: true,
+  ccSwitchProviderId: "",
+  model: "",
+  targetFolder: "Video Memos",
+  cleanupMedia: false
+};
+function normalizeSettings(stored) {
+  const stringValue = (value, fallback) => typeof value === "string" ? value : fallback;
+  return {
+    projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
+    pythonPath: stringValue(stored?.pythonPath, DEFAULT_SETTINGS.pythonPath),
+    providerSource: stored?.providerSource === "environment" ? "environment" : "ccswitch",
+    ccSwitchDbPath: stringValue(stored?.ccSwitchDbPath, DEFAULT_SETTINGS.ccSwitchDbPath),
+    ccSwitchAppType: stringValue(stored?.ccSwitchAppType, DEFAULT_SETTINGS.ccSwitchAppType),
+    ccSwitchFollowCurrent: typeof stored?.ccSwitchFollowCurrent === "boolean" ? stored.ccSwitchFollowCurrent : DEFAULT_SETTINGS.ccSwitchFollowCurrent,
+    ccSwitchProviderId: stringValue(
+      stored?.ccSwitchProviderId,
+      DEFAULT_SETTINGS.ccSwitchProviderId
+    ),
+    model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
+    targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
+    cleanupMedia: typeof stored?.cleanupMedia === "boolean" ? stored.cleanupMedia : DEFAULT_SETTINGS.cleanupMedia
+  };
+}
+function describeProviderSelection(settings) {
+  if (settings.providerSource === "environment") {
+    return settings.model ? `\u73AF\u5883\u914D\u7F6E \xB7 ${settings.model}` : "\u4F7F\u7528\u9879\u76EE\u73AF\u5883\u53D8\u91CF\u914D\u7F6E";
+  }
+  try {
+    const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
+    const provider = settings.ccSwitchFollowCurrent ? providers.find(
+      (item) => item.appType === settings.ccSwitchAppType && item.isCurrent
+    ) : providers.find(
+      (item) => item.appType === settings.ccSwitchAppType && item.id === settings.ccSwitchProviderId
+    );
+    if (!provider) {
+      return `cc-switch \xB7 ${settings.ccSwitchAppType} \xB7 \u914D\u7F6E\u9700\u8981\u68C0\u67E5`;
+    }
+    const mode = settings.ccSwitchFollowCurrent ? "\u8DDF\u968F\u5168\u5C40\u5F53\u524D" : "\u5DF2\u56FA\u5B9A";
+    const model = settings.model || provider.model;
+    return model ? `cc-switch \xB7 ${provider.name} \xB7 ${mode} \xB7 \u6A21\u578B ${model}` : `cc-switch \xB7 ${provider.name} \xB7 ${mode}`;
+  } catch {
+    return "cc-switch \xB7 \u65E0\u6CD5\u8BFB\u53D6\u6570\u636E\u5E93";
+  }
+}
+
+// src/settings-tab.ts
+var import_obsidian4 = require("obsidian");
+
+// src/ccswitch-settings.ts
+var import_obsidian3 = require("obsidian");
 function icon(parent, name, className = "") {
   const element = parent.createSpan({ cls: className });
-  (0, import_obsidian2.setIcon)(element, name);
+  (0, import_obsidian3.setIcon)(element, name);
   return element;
 }
 function actionButton(parent, options) {
@@ -1114,6 +1337,7 @@ var CcSwitchProviderSettingsView = class {
   selectedAppType = "codex";
   selectedProviderId = "";
   configTab = "parsed";
+  rawDetailExpanded = false;
   providerModelStates = /* @__PURE__ */ new Map();
   modelRequestId = 0;
   constructor(options) {
@@ -1122,6 +1346,7 @@ var CcSwitchProviderSettingsView = class {
   showProviderList() {
     this.selectedProviderId = "";
     this.configTab = "parsed";
+    this.rawDetailExpanded = false;
   }
   render(parent) {
     const settings = this.options.getSettings();
@@ -1159,7 +1384,7 @@ var CcSwitchProviderSettingsView = class {
     const headingCopy = heading.createDiv();
     headingCopy.createEl("h2", { text: "\u4F9B\u5E94\u5546 (cc-switch)" });
     headingCopy.createEl("p", {
-      text: "\u53EA\u8BFB\u89E3\u6790\u672C\u673A cc-switch \u6570\u636E\u5E93\uFF0C\u9009\u62E9\u89C6\u9891\u603B\u7ED3\u4EFB\u52A1\u4F7F\u7528\u7684 API \u4F9B\u5E94\u5546\u3002"
+      text: "\u53EA\u8BFB\u89E3\u6790\u672C\u673A cc-switch \u6570\u636E\u5E93\uFF0C\u9009\u62E9 VideoMemo \u4EFB\u52A1\u4F7F\u7528\u7684 API \u4F9B\u5E94\u5546\u3002"
     });
     const sourceSwitch = heading.createDiv({
       cls: "ccswitch-source-switch",
@@ -1258,7 +1483,7 @@ var CcSwitchProviderSettingsView = class {
       const electron = require("electron");
       const path = electron.webUtils?.getPathForFile(file) ?? file.path ?? "";
       if (!path) {
-        new import_obsidian2.Notice("\u65E0\u6CD5\u8BFB\u53D6\u6240\u9009\u6570\u636E\u5E93\u7684\u672C\u5730\u8DEF\u5F84");
+        new import_obsidian3.Notice("\u65E0\u6CD5\u8BFB\u53D6\u6240\u9009\u6570\u636E\u5E93\u7684\u672C\u5730\u8DEF\u5F84");
         return;
       }
       void this.options.updateSettings({ ccSwitchDbPath: path }).then(() => {
@@ -1327,8 +1552,9 @@ var CcSwitchProviderSettingsView = class {
     return settings.ccSwitchFollowCurrent ? provider.isCurrent : provider.id === settings.ccSwitchProviderId;
   }
   renderProviderRow(parent, provider, settings) {
+    const active = this.isProviderActive(provider, settings);
     const row = parent.createEl("button", {
-      cls: "ccswitch-provider-row",
+      cls: `ccswitch-provider-row${active ? " is-active" : ""}`,
       attr: { type: "button", "aria-label": `\u67E5\u770B ${provider.name} \u914D\u7F6E` }
     });
     const tile = row.createDiv({ cls: "ccswitch-provider-icon" });
@@ -1337,12 +1563,13 @@ var CcSwitchProviderSettingsView = class {
     copy.createDiv({ cls: "ccswitch-provider-name", text: provider.name });
     copy.createDiv({ cls: "ccswitch-provider-subtitle", text: providerSubtitle(provider) });
     const trailing = row.createDiv({ cls: "ccswitch-provider-trailing" });
-    if (this.isProviderActive(provider, settings)) badge(trailing, "\u4F7F\u7528\u4E2D", "accent");
+    if (active) badge(trailing, "\u4F7F\u7528\u4E2D", "accent");
     else if (provider.isCurrent) badge(trailing, "\u5168\u5C40\u5F53\u524D", "neutral");
     icon(trailing, "chevron-right");
     row.addEventListener("click", () => {
       this.selectedProviderId = provider.id;
       this.configTab = "parsed";
+      this.rawDetailExpanded = false;
       this.providerModelStates.delete(this.providerModelKey(provider));
       this.options.rerender();
     });
@@ -1396,6 +1623,20 @@ var CcSwitchProviderSettingsView = class {
     metadataField(metadata, "Base URL", provider.baseUrl, "link-2");
     metadataField(metadata, "\u6A21\u578B", provider.model, "cpu");
     metadataField(metadata, "API \u683C\u5F0F", provider.apiFormat, "braces");
+    const rawToggle = parent.createEl("button", {
+      cls: "ccswitch-raw-toggle",
+      attr: {
+        type: "button",
+        "aria-expanded": String(this.rawDetailExpanded)
+      }
+    });
+    icon(rawToggle, this.rawDetailExpanded ? "chevron-down" : "chevron-right");
+    rawToggle.createSpan({ text: "\u67E5\u770B\u539F\u59CB\u914D\u7F6E\uFF08\u5DF2\u8131\u654F\uFF09" });
+    rawToggle.addEventListener("click", () => {
+      this.rawDetailExpanded = !this.rawDetailExpanded;
+      this.options.rerender();
+    });
+    if (!this.rawDetailExpanded) return;
     const envSection = parent.createDiv({ cls: "ccswitch-detail-section" });
     const envTitle = envSection.createDiv({ cls: "ccswitch-section-title" });
     icon(envTitle, "key-round");
@@ -1437,9 +1678,9 @@ var CcSwitchProviderSettingsView = class {
       cls: "clickable-icon",
       attr: { type: "button", "aria-label": "\u590D\u5236\u914D\u7F6E" }
     });
-    (0, import_obsidian2.setIcon)(copyButton, "copy");
+    (0, import_obsidian3.setIcon)(copyButton, "copy");
     copyButton.addEventListener("click", () => {
-      void navigator.clipboard.writeText(content).then(() => new import_obsidian2.Notice("\u914D\u7F6E\u5DF2\u590D\u5236"));
+      void navigator.clipboard.writeText(content).then(() => new import_obsidian3.Notice("\u914D\u7F6E\u5DF2\u590D\u5236"));
     });
     configSection.createEl("pre", { cls: "ccswitch-code-block", text: content });
   }
@@ -1479,7 +1720,7 @@ var CcSwitchProviderSettingsView = class {
       cls: `clickable-icon ccswitch-model-refresh${modelState.status === "loading" ? " is-loading" : ""}`,
       attr: { type: "button", "aria-label": "\u5B9E\u65F6\u5237\u65B0\u6A21\u578B\u5217\u8868" }
     });
-    (0, import_obsidian2.setIcon)(refresh, "refresh-cw");
+    (0, import_obsidian3.setIcon)(refresh, "refresh-cw");
     refresh.disabled = modelState.status === "loading";
     refresh.addEventListener("click", () => this.startProviderModelRequest(provider, true));
   }
@@ -1542,8 +1783,114 @@ var CcSwitchProviderSettingsView = class {
   }
 };
 
-// src/main.ts
-var EVENT_PREFIX = "@@VIDEO_SUMMARIZER@@";
+// src/settings-tab.ts
+var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
+  plugin;
+  providerView;
+  page = "settings";
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+    this.providerView = new CcSwitchProviderSettingsView({
+      app,
+      getSettings: () => this.plugin.settings,
+      updateSettings: async (patch) => {
+        Object.assign(this.plugin.settings, patch);
+        await this.plugin.saveData(this.plugin.settings);
+      },
+      rerender: () => this.display(),
+      onBack: () => {
+        this.page = "settings";
+        this.display();
+      }
+    });
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.addClass("video-memo-settings-tab");
+    containerEl.empty();
+    if (this.page === "providers") {
+      this.providerView.render(containerEl);
+      return;
+    }
+    const intro = containerEl.createDiv({ cls: "video-memo-settings-intro" });
+    const introMark = intro.createDiv({ cls: "video-memo-settings-mark" });
+    (0, import_obsidian4.setIcon)(introMark, "video");
+    const introCopy = intro.createDiv({ cls: "video-memo-settings-intro-copy" });
+    introCopy.createDiv({ cls: "video-memo-settings-kicker", text: "\u5DE5\u4F5C\u533A\u8BBE\u7F6E" });
+    introCopy.createEl("h2", { text: "VideoMemo" });
+    introCopy.createDiv({
+      cls: "video-memo-settings-description",
+      text: "\u8FD0\u884C\u73AF\u5883 \xB7 \u8F93\u51FA \xB7 \u4F9B\u5E94\u5546"
+    });
+    const openProviders = () => {
+      this.page = "providers";
+      this.providerView.showProviderList();
+      this.display();
+    };
+    const providerSetting = new import_obsidian4.Setting(containerEl).setName("\u4F9B\u5E94\u5546").setDesc(describeProviderSelection(this.plugin.settings)).addExtraButton(
+      (button) => button.setIcon("chevron-right").setTooltip("\u6253\u5F00\u4F9B\u5E94\u5546\u8BBE\u7F6E").onClick(openProviders)
+    );
+    providerSetting.settingEl.addClass("video-memo-navigation-setting");
+    providerSetting.settingEl.setAttribute("role", "button");
+    providerSetting.settingEl.tabIndex = 0;
+    providerSetting.settingEl.addEventListener("click", (event) => {
+      if (event.target.closest("button")) return;
+      openProviders();
+    });
+    providerSetting.settingEl.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      openProviders();
+    });
+    containerEl.createDiv({
+      cls: "video-memo-settings-section-label",
+      text: "\u8FD0\u884C\u73AF\u5883"
+    });
+    new import_obsidian4.Setting(containerEl).setName("\u9879\u76EE\u76EE\u5F55").setDesc("\u5305\u542B src/pipeline.py \u7684 VideoMemo \u76EE\u5F55").addText(
+      (text) => text.setPlaceholder("D:\\AIApp\\video-memo").setValue(this.plugin.settings.projectPath).onChange(async (value) => {
+        this.plugin.settings.projectPath = value.trim();
+        await this.plugin.saveData(this.plugin.settings);
+      })
+    );
+    new import_obsidian4.Setting(containerEl).setName("Python \u8DEF\u5F84").setDesc("\u7559\u7A7A\u65F6\u4F18\u5148\u4F7F\u7528\u9879\u76EE .venv\uFF0C\u968F\u540E\u4F7F\u7528 PATH \u4E2D\u7684 python").addText(
+      (text) => text.setValue(this.plugin.settings.pythonPath).onChange(async (value) => {
+        this.plugin.settings.pythonPath = value.trim();
+        await this.plugin.saveData(this.plugin.settings);
+      })
+    );
+    containerEl.createDiv({
+      cls: "video-memo-settings-section-label",
+      text: "\u8F93\u51FA"
+    });
+    new import_obsidian4.Setting(containerEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939").addText(
+      (text) => text.setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
+        this.plugin.settings.targetFolder = value.trim();
+        await this.plugin.saveData(this.plugin.settings);
+      })
+    );
+    new import_obsidian4.Setting(containerEl).setName("\u5B8C\u6210\u540E\u6E05\u7406\u5A92\u4F53").setDesc("\u5220\u9664\u8F93\u51FA\u76EE\u5F55\u4E2D\u7684\u4E0B\u8F7D\u5A92\u4F53\u548C\u97F3\u8F68\uFF0C\u4E0D\u5220\u9664\u672C\u5730\u8F93\u5165\u6587\u4EF6").addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.cleanupMedia).onChange(async (value) => {
+        this.plugin.settings.cleanupMedia = value;
+        await this.plugin.saveData(this.plugin.settings);
+      })
+    );
+  }
+  showHome() {
+    this.page = "settings";
+    this.providerView.showProviderList();
+  }
+  showProviders() {
+    this.page = "providers";
+    this.providerView.showProviderList();
+  }
+  hide() {
+    this.showHome();
+  }
+};
+
+// src/source-modal.ts
+var import_obsidian5 = require("obsidian");
 var MEDIA_ACCEPT = [
   ".mp4",
   ".mkv",
@@ -1567,40 +1914,11 @@ var MEDIA_ACCEPT = [
   ".amr",
   ".aiff"
 ].join(",");
-var DEFAULT_SETTINGS = {
-  projectPath: "",
-  pythonPath: "",
-  providerSource: "ccswitch",
-  ccSwitchDbPath: "",
-  ccSwitchAppType: "codex",
-  ccSwitchFollowCurrent: true,
-  ccSwitchProviderId: "",
-  model: "",
-  targetFolder: "Video Summaries",
-  cleanupMedia: false
-};
-function normalizeSettings(stored) {
-  const stringValue = (value, fallback) => typeof value === "string" ? value : fallback;
-  return {
-    projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
-    pythonPath: stringValue(stored?.pythonPath, DEFAULT_SETTINGS.pythonPath),
-    providerSource: stored?.providerSource === "environment" ? "environment" : "ccswitch",
-    ccSwitchDbPath: stringValue(stored?.ccSwitchDbPath, DEFAULT_SETTINGS.ccSwitchDbPath),
-    ccSwitchAppType: stringValue(stored?.ccSwitchAppType, DEFAULT_SETTINGS.ccSwitchAppType),
-    ccSwitchFollowCurrent: typeof stored?.ccSwitchFollowCurrent === "boolean" ? stored.ccSwitchFollowCurrent : DEFAULT_SETTINGS.ccSwitchFollowCurrent,
-    ccSwitchProviderId: stringValue(
-      stored?.ccSwitchProviderId,
-      DEFAULT_SETTINGS.ccSwitchProviderId
-    ),
-    model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
-    targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
-    cleanupMedia: typeof stored?.cleanupMedia === "boolean" ? stored.cleanupMedia : DEFAULT_SETTINGS.cleanupMedia
-  };
-}
-var TextPromptModal = class extends import_obsidian3.Modal {
+var TextPromptModal = class extends import_obsidian5.Modal {
   titleText;
   fieldName;
   placeholder;
+  providerBadge;
   onSubmit;
   onOpenSettings;
   showMediaPicker;
@@ -1609,30 +1927,59 @@ var TextPromptModal = class extends import_obsidian3.Modal {
     this.titleText = options.title;
     this.fieldName = options.fieldName;
     this.placeholder = options.placeholder;
+    this.providerBadge = options.providerBadge ?? "";
     this.onSubmit = options.onSubmit;
     this.onOpenSettings = options.onOpenSettings ?? null;
     this.showMediaPicker = options.showMediaPicker ?? false;
   }
   onOpen() {
-    this.modalEl.addClass("video-summarizer-shell");
-    this.contentEl.addClass("video-summarizer-modal");
+    this.modalEl.addClass("video-memo-shell");
+    this.contentEl.addClass("video-memo-modal");
     const titleRow = this.contentEl.createDiv({
-      cls: "video-summarizer-title-row"
+      cls: "video-memo-title-row"
     });
-    titleRow.createEl("h2", { text: this.titleText });
-    if (this.onOpenSettings) {
-      const settingsButton = titleRow.createEl("button", {
-        cls: "clickable-icon video-summarizer-settings-button",
-        attr: {
-          type: "button",
-          "aria-label": "\u6253\u5F00 Video Summarizer \u8BBE\u7F6E"
-        }
+    const titleCopy = titleRow.createDiv({ cls: "video-memo-title-copy" });
+    titleCopy.createDiv({
+      cls: "video-memo-modal-kicker",
+      text: this.showMediaPicker ? "\u65B0\u5EFA\u4EFB\u52A1" : "\u5DF2\u6709\u8FD0\u884C\u76EE\u5F55"
+    });
+    titleCopy.createEl("h2", { text: this.titleText });
+    titleCopy.createDiv({
+      cls: "video-memo-modal-subtitle",
+      text: this.showMediaPicker ? "\u89C6\u9891\u94FE\u63A5 \xB7 \u672C\u5730\u5A92\u4F53" : "\u5DF2\u6709\u8F6C\u5199 \xB7 \u91CD\u65B0\u751F\u6210"
+    });
+    if (this.providerBadge || this.onOpenSettings) {
+      const badgeRow = this.contentEl.createDiv({
+        cls: "video-memo-badge-row"
       });
-      (0, import_obsidian3.setIcon)(settingsButton, "settings");
-      settingsButton.addEventListener("click", () => {
-        this.close();
-        this.onOpenSettings?.();
-      });
+      if (this.providerBadge) {
+        const badge2 = badgeRow.createDiv({
+          cls: "video-memo-provider-badge",
+          attr: { "aria-label": "\u5F53\u524D\u4EFB\u52A1\u4F7F\u7528\u7684\u4F9B\u5E94\u5546" }
+        });
+        const badgeIcon = badge2.createSpan({
+          cls: "video-memo-provider-badge-icon"
+        });
+        (0, import_obsidian5.setIcon)(badgeIcon, "server");
+        badge2.createSpan({
+          cls: "video-memo-provider-badge-text",
+          text: this.providerBadge
+        });
+      }
+      if (this.onOpenSettings) {
+        const settingsButton = badgeRow.createEl("button", {
+          cls: "clickable-icon video-memo-settings-button",
+          attr: {
+            type: "button",
+            "aria-label": "\u6253\u5F00 VideoMemo \u8BBE\u7F6E"
+          }
+        });
+        (0, import_obsidian5.setIcon)(settingsButton, "settings");
+        settingsButton.addEventListener("click", () => {
+          this.close();
+          this.onOpenSettings?.();
+        });
+      }
     }
     let value = "";
     let linkValue = "";
@@ -1642,7 +1989,7 @@ var TextPromptModal = class extends import_obsidian3.Modal {
       const normalized = (this.showMediaPicker ? sourceMode === "link" ? linkValue : fileValue : value).trim();
       if (!normalized) {
         const missing = this.showMediaPicker ? sourceMode === "link" ? "\u8BF7\u8F93\u5165\u89C6\u9891\u94FE\u63A5" : "\u8BF7\u9009\u62E9\u672C\u5730\u6587\u4EF6" : `${this.fieldName}\u4E0D\u80FD\u4E3A\u7A7A`;
-        new import_obsidian3.Notice(missing);
+        new import_obsidian5.Notice(missing);
         return;
       }
       this.close();
@@ -1661,18 +2008,18 @@ var TextPromptModal = class extends import_obsidian3.Modal {
         );
       };
       const modeSwitch = this.contentEl.createDiv({
-        cls: "video-summarizer-mode-switch",
+        cls: "video-memo-mode-switch",
         attr: { "aria-label": "\u8F93\u5165\u7C7B\u578B" }
       });
       const createModeButton = (label, icon2, mode) => {
         const button = modeSwitch.createEl("button", {
-          cls: "video-summarizer-mode-button",
+          cls: "video-memo-mode-button",
           attr: { type: "button" }
         });
         const iconElement = button.createSpan({
-          cls: "video-summarizer-mode-icon"
+          cls: "video-memo-mode-icon"
         });
-        (0, import_obsidian3.setIcon)(iconElement, icon2);
+        (0, import_obsidian5.setIcon)(iconElement, icon2);
         button.createSpan({ text: label });
         button.addEventListener("click", () => setSourceMode(mode));
         return button;
@@ -1680,7 +2027,7 @@ var TextPromptModal = class extends import_obsidian3.Modal {
       let linkInput = null;
       let fileControl = null;
       let fileInputElement = null;
-      const linkSetting = new import_obsidian3.Setting(this.contentEl).setClass("video-summarizer-input-setting").setName("\u89C6\u9891\u94FE\u63A5").addText((text) => {
+      const linkSetting = new import_obsidian5.Setting(this.contentEl).setClass("video-memo-input-setting").setName("\u89C6\u9891\u94FE\u63A5").addText((text) => {
         linkInput = text.inputEl;
         text.setPlaceholder("https://...").onChange((next) => {
           linkValue = next;
@@ -1689,7 +2036,7 @@ var TextPromptModal = class extends import_obsidian3.Modal {
           if (event.key === "Enter") submit();
         });
       });
-      const fileSetting = new import_obsidian3.Setting(this.contentEl).setClass("video-summarizer-input-setting").setName("\u672C\u5730\u89C6\u9891\u6216\u5F55\u97F3").addText((text) => {
+      const fileSetting = new import_obsidian5.Setting(this.contentEl).setClass("video-memo-input-setting").setName("\u672C\u5730\u89C6\u9891\u6216\u5F55\u97F3").addText((text) => {
         fileControl = text;
         fileInputElement = text.inputEl;
         text.setPlaceholder("\u9009\u62E9\u6587\u4EF6\uFF0C\u6216\u7C98\u8D34\u672C\u5730\u8DEF\u5F84").onChange((next) => {
@@ -1700,7 +2047,7 @@ var TextPromptModal = class extends import_obsidian3.Modal {
         });
       });
       const fileInput = this.contentEl.createEl("input", {
-        cls: "video-summarizer-native-file",
+        cls: "video-memo-native-file",
         attr: { type: "file", accept: MEDIA_ACCEPT }
       });
       fileInput.addEventListener("change", () => {
@@ -1709,7 +2056,7 @@ var TextPromptModal = class extends import_obsidian3.Modal {
         const electron = require("electron");
         const selectedPath = electron.webUtils?.getPathForFile(file) ?? file.path ?? "";
         if (!selectedPath) {
-          new import_obsidian3.Notice("\u65E0\u6CD5\u8BFB\u53D6\u6240\u9009\u6587\u4EF6\u7684\u672C\u5730\u8DEF\u5F84");
+          new import_obsidian5.Notice("\u65E0\u6CD5\u8BFB\u53D6\u6240\u9009\u6587\u4EF6\u7684\u672C\u5730\u8DEF\u5F84");
           return;
         }
         fileValue = selectedPath;
@@ -1722,7 +2069,7 @@ var TextPromptModal = class extends import_obsidian3.Modal {
       const fileButton = createModeButton("\u672C\u5730\u6587\u4EF6", "folder-open", "file");
       setSourceMode("link");
     } else {
-      new import_obsidian3.Setting(this.contentEl).setClass("video-summarizer-input-setting").setName(this.fieldName).addText((text) => {
+      new import_obsidian5.Setting(this.contentEl).setClass("video-memo-input-setting").setName(this.fieldName).addText((text) => {
         text.setPlaceholder(this.placeholder).onChange((next) => {
           value = next;
         });
@@ -1732,7 +2079,7 @@ var TextPromptModal = class extends import_obsidian3.Modal {
         window.setTimeout(() => text.inputEl.focus(), 0);
       });
     }
-    new import_obsidian3.Setting(this.contentEl).setClass("video-summarizer-actions").addButton((button) => button.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton(
+    new import_obsidian5.Setting(this.contentEl).setClass("video-memo-actions").addButton((button) => button.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton(
       (button) => button.setButtonText("\u5F00\u59CB").setCta().onClick(submit)
     );
   }
@@ -1740,12 +2087,19 @@ var TextPromptModal = class extends import_obsidian3.Modal {
     this.contentEl.empty();
   }
 };
-var VideoSummarizerPlugin = class extends import_obsidian3.Plugin {
+
+// src/main.ts
+var EVENT_PREFIX = "@@VIDEOMEMO@@";
+var MAX_LOG_LINES = 500;
+var NOTE_OPEN_ATTEMPTS = 12;
+var NOTE_OPEN_INTERVAL_MS = 250;
+var VideoMemoPlugin = class extends import_obsidian6.Plugin {
   settings = DEFAULT_SETTINGS;
   activeProcess = null;
   statusEl = null;
-  generatedNotePath = null;
   stderrTail = "";
+  taskState = null;
+  progressModal = null;
   async onload() {
     const stored = await this.loadData();
     this.settings = normalizeSettings(stored);
@@ -1753,9 +2107,11 @@ var VideoSummarizerPlugin = class extends import_obsidian3.Plugin {
       await this.saveData(this.settings);
     }
     this.statusEl = this.addStatusBarItem();
-    this.statusEl.addClass("video-summarizer-status");
-    this.statusEl.setText("Video Summarizer: \u5C31\u7EEA");
-    const settingTab = new VideoSummarizerSettingTab(this.app, this);
+    this.statusEl.addClass("video-memo-status");
+    this.statusEl.setAttribute("aria-label", "\u70B9\u51FB\u67E5\u770B\u4EFB\u52A1\u8FDB\u5EA6");
+    this.setStatus("VideoMemo: \u5C31\u7EEA");
+    this.registerDomEvent(this.statusEl, "click", () => this.openProgressModal());
+    const settingTab = new VideoMemoSettingTab(this.app, this);
     this.addSettingTab(settingTab);
     this.addRibbonIcon("video", "\u603B\u7ED3\u89C6\u9891\u6216\u5F55\u97F3", () => this.openSourceModal());
     this.addCommand({
@@ -1802,12 +2158,14 @@ var VideoSummarizerPlugin = class extends import_obsidian3.Plugin {
   }
   onunload() {
     this.cancelActiveTask(false);
+    this.progressModal?.close();
   }
   openSourceModal() {
     new TextPromptModal(this.app, {
       title: "\u603B\u7ED3\u89C6\u9891\u6216\u5F55\u97F3",
       fieldName: "\u94FE\u63A5\u6216\u672C\u5730\u6587\u4EF6\u8DEF\u5F84",
       placeholder: "https://... \u6216 D:\\Media\\course.mp4",
+      providerBadge: describeProviderSelection(this.settings),
       showMediaPicker: true,
       onOpenSettings: () => this.openPluginSettings(),
       onSubmit: (value) => this.startEngine([value])
@@ -1817,15 +2175,16 @@ var VideoSummarizerPlugin = class extends import_obsidian3.Plugin {
     new TextPromptModal(this.app, {
       title: "\u91CD\u65B0\u751F\u6210\u62A5\u544A",
       fieldName: "\u8FD0\u884C\u76EE\u5F55",
-      placeholder: "D:\\video-summarizer\\output\\20260717_...",
+      placeholder: "D:\\video-memo\\output\\20260717_...",
+      providerBadge: describeProviderSelection(this.settings),
       onOpenSettings: () => this.openPluginSettings(),
       onSubmit: (value) => this.startEngine(["--regenerate", value])
     }).open();
   }
   vaultPath() {
     const adapter = this.app.vault.adapter;
-    if (!(adapter instanceof import_obsidian3.FileSystemAdapter)) {
-      new import_obsidian3.Notice("Video Summarizer \u4EC5\u652F\u6301\u684C\u9762\u6587\u4EF6\u7CFB\u7EDF Vault");
+    if (!(adapter instanceof import_obsidian6.FileSystemAdapter)) {
+      new import_obsidian6.Notice("VideoMemo \u4EC5\u652F\u6301\u684C\u9762\u6587\u4EF6\u7CFB\u7EDF Vault");
       return null;
     }
     return adapter.getBasePath();
@@ -1844,15 +2203,33 @@ var VideoSummarizerPlugin = class extends import_obsidian3.Plugin {
     app.setting.open();
     app.setting.openTabById(this.manifest.id);
   }
+  setStatus(text) {
+    this.statusEl?.setText(text);
+    this.statusEl?.toggleClass("is-clickable", this.taskState !== null);
+  }
+  openProgressModal() {
+    if (!this.taskState || this.progressModal) return;
+    const modal = new RunProgressModal(this.app, {
+      state: this.taskState,
+      onCancel: () => this.cancelActiveTask(),
+      onOpenNote: () => void this.openGeneratedNote(),
+      onClosed: () => {
+        if (this.progressModal === modal) this.progressModal = null;
+      }
+    });
+    this.progressModal = modal;
+    modal.open();
+  }
   startEngine(sourceArgs) {
     if (this.activeProcess) {
-      new import_obsidian3.Notice("\u5DF2\u6709\u603B\u7ED3\u4EFB\u52A1\u6B63\u5728\u8FD0\u884C");
+      new import_obsidian6.Notice("\u5DF2\u6709\u603B\u7ED3\u4EFB\u52A1\u6B63\u5728\u8FD0\u884C");
+      this.openProgressModal();
       return;
     }
     const projectPath = this.settings.projectPath.trim();
     const pipelinePath = (0, import_node_path2.join)(projectPath, "src", "pipeline.py");
     if (!projectPath || !(0, import_node_fs2.existsSync)(pipelinePath)) {
-      new import_obsidian3.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u914D\u7F6E Video Summarizer \u9879\u76EE\u76EE\u5F55");
+      new import_obsidian6.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u914D\u7F6E VideoMemo \u9879\u76EE\u76EE\u5F55");
       return;
     }
     const vaultPath = this.vaultPath();
@@ -1860,6 +2237,7 @@ var VideoSummarizerPlugin = class extends import_obsidian3.Plugin {
     const engineEnv = { ...process.env, PYTHONUTF8: "1" };
     let selectedModel = this.settings.model.trim();
     let providerBaseUrl = "";
+    let providerLabel = selectedModel ? `\u73AF\u5883\u914D\u7F6E \xB7 ${selectedModel}` : "\u73AF\u5883\u914D\u7F6E";
     if (this.settings.providerSource === "ccswitch") {
       try {
         const runtime = resolveCcSwitchProviderRuntime({
@@ -1870,12 +2248,14 @@ var VideoSummarizerPlugin = class extends import_obsidian3.Plugin {
         });
         providerBaseUrl = runtime.baseUrl;
         selectedModel = selectedModel || runtime.model || "";
+        providerLabel = selectedModel ? `${runtime.name} \xB7 ${selectedModel}` : `${runtime.name} \xB7 \u9ED8\u8BA4\u6A21\u578B`;
         engineEnv.LLM_API_KEY = runtime.apiKey;
         engineEnv.LLM_BASE_URL = runtime.baseUrl;
-        if (runtime.apiFormat) engineEnv.LLM_API_FORMAT = runtime.apiFormat;
+        engineEnv.LLM_API_FORMAT = runtime.apiFormat || "chat_completions";
+        if (!selectedModel) delete engineEnv.LLM_MODEL;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        new import_obsidian3.Notice(`\u65E0\u6CD5\u4F7F\u7528 cc-switch \u4F9B\u5E94\u5546
+        new import_obsidian6.Notice(`\u65E0\u6CD5\u4F7F\u7528 cc-switch \u4F9B\u5E94\u5546
 ${message}`, 8e3);
         this.openPluginSettings();
         return;
@@ -1892,12 +2272,24 @@ ${message}`, 8e3);
     ];
     if (selectedModel) args.push("--llm-model", selectedModel);
     if (providerBaseUrl) args.push("--api-base-url", providerBaseUrl);
-    if (this.settings.cleanupMedia && sourceArgs[0] !== "--regenerate") {
+    const isRegenerate = sourceArgs[0] === "--regenerate";
+    if (this.settings.cleanupMedia && !isRegenerate) {
       args.push("--cleanup-media");
     }
-    this.generatedNotePath = null;
+    this.progressModal?.close();
     this.stderrTail = "";
-    this.statusEl?.setText("Video Summarizer: \u542F\u52A8\u4E2D");
+    this.taskState = {
+      kicker: isRegenerate ? "\u91CD\u65B0\u751F\u6210" : "\u65B0\u5EFA\u4EFB\u52A1",
+      source: (isRegenerate ? sourceArgs[1] : sourceArgs[0]) ?? "",
+      providerLabel,
+      status: "running",
+      progress: 0,
+      stage: "\u542F\u52A8 Python \u5F15\u64CE\u2026",
+      log: [],
+      errorDetail: "",
+      notePath: null
+    };
+    this.setStatus("VideoMemo: \u542F\u52A8\u4E2D");
     const child = (0, import_node_child_process.spawn)(this.resolvePython(projectPath), args, {
       cwd: projectPath,
       env: engineEnv,
@@ -1905,6 +2297,7 @@ ${message}`, 8e3);
       windowsHide: true
     });
     this.activeProcess = child;
+    this.openProgressModal();
     (0, import_node_readline.createInterface)({ input: child.stdout }).on("line", (line) => {
       this.handleOutputLine(line, vaultPath);
     });
@@ -1929,13 +2322,23 @@ ${message}`, 8e3);
     if (marker < 0) return;
     try {
       const event = JSON.parse(line.slice(marker + EVENT_PREFIX.length));
-      if (event.type === "progress") {
-        const percent = Math.round((event.progress ?? 0) * 100);
-        const message = (event.message ?? "\u5904\u7406\u4E2D").trim().split("\n").at(-1);
-        this.statusEl?.setText(`Video Summarizer: ${percent}% ${message ?? ""}`);
+      const state = this.taskState;
+      if (event.type === "progress" && state) {
+        state.progress = Math.max(0, Math.min(1, event.progress ?? 0));
+        const message = (event.message ?? "").replace(/\s+$/, "");
+        const lines = message.split("\n").map((item) => item.replace(/\s+$/, "")).filter((item) => item.trim().length > 0);
+        const lastLine = lines.at(-1)?.trim() ?? "";
+        if (lastLine) state.stage = lastLine;
+        state.log.push(...lines);
+        if (state.log.length > MAX_LOG_LINES) {
+          state.log.splice(0, state.log.length - MAX_LOG_LINES);
+        }
+        const percent = Math.round(state.progress * 100);
+        this.setStatus(`VideoMemo: ${percent}% ${lastLine || "\u5904\u7406\u4E2D"}`);
+        this.progressModal?.refresh();
       } else if (event.type === "artifact" && event.kind === "obsidian_note") {
-        if (event.path && (0, import_node_path2.isAbsolute)(event.path)) {
-          this.generatedNotePath = (0, import_obsidian3.normalizePath)((0, import_node_path2.relative)(vaultPath, event.path));
+        if (state && event.path && (0, import_node_path2.isAbsolute)(event.path)) {
+          state.notePath = (0, import_obsidian6.normalizePath)((0, import_node_path2.relative)(vaultPath, event.path));
         }
       }
     } catch {
@@ -1943,18 +2346,43 @@ ${message}`, 8e3);
   }
   finishTask(success, errorMessage) {
     this.activeProcess = null;
+    const state = this.taskState;
     if (!success) {
-      this.statusEl?.setText("Video Summarizer: \u5931\u8D25");
-      new import_obsidian3.Notice(`\u89C6\u9891\u603B\u7ED3\u5931\u8D25
+      if (state) {
+        state.status = "error";
+        state.errorDetail = errorMessage ?? "\u672A\u77E5\u9519\u8BEF";
+        state.stage = "\u4EFB\u52A1\u5931\u8D25";
+      }
+      this.setStatus("VideoMemo: \u5931\u8D25");
+      this.progressModal?.refresh();
+      new import_obsidian6.Notice(`\u89C6\u9891\u603B\u7ED3\u5931\u8D25
 ${errorMessage ?? "\u672A\u77E5\u9519\u8BEF"}`, 1e4);
       return;
     }
-    this.statusEl?.setText("Video Summarizer: \u5B8C\u6210");
-    new import_obsidian3.Notice("\u89C6\u9891\u603B\u7ED3\u5DF2\u751F\u6210");
-    if (!this.generatedNotePath) return;
-    const note = this.app.vault.getAbstractFileByPath(this.generatedNotePath);
-    if (note instanceof import_obsidian3.TFile) {
-      void this.app.workspace.getLeaf(false).openFile(note);
+    if (state) {
+      state.status = "success";
+      state.progress = 1;
+      state.stage = "\u89C6\u9891\u603B\u7ED3\u5DF2\u751F\u6210";
+    }
+    this.setStatus("VideoMemo: \u5B8C\u6210");
+    this.progressModal?.refresh();
+    new import_obsidian6.Notice("\u89C6\u9891\u603B\u7ED3\u5DF2\u751F\u6210");
+    void this.openGeneratedNote();
+  }
+  /**
+   * The engine writes the note straight to disk, so Obsidian may not have
+   * indexed it yet when the process exits. Retry briefly before giving up.
+   */
+  async openGeneratedNote() {
+    const path = this.taskState?.notePath;
+    if (!path) return;
+    for (let attempt = 0; attempt < NOTE_OPEN_ATTEMPTS; attempt++) {
+      const note = this.app.vault.getAbstractFileByPath(path);
+      if (note instanceof import_obsidian6.TFile) {
+        await this.app.workspace.getLeaf(false).openFile(note);
+        return;
+      }
+      await new Promise((resolve2) => window.setTimeout(resolve2, NOTE_OPEN_INTERVAL_MS));
     }
   }
   cancelActiveTask(showNotice = true) {
@@ -1968,111 +2396,13 @@ ${errorMessage ?? "\u672A\u77E5\u9519\u8BEF"}`, 1e4);
     } else {
       child.kill("SIGTERM");
     }
-    this.statusEl?.setText("Video Summarizer: \u5DF2\u53D6\u6D88");
-    if (showNotice) new import_obsidian3.Notice("\u5DF2\u53D6\u6D88\u89C6\u9891\u603B\u7ED3\u4EFB\u52A1");
-  }
-};
-var VideoSummarizerSettingTab = class extends import_obsidian3.PluginSettingTab {
-  plugin;
-  providerView;
-  page = "settings";
-  constructor(app, plugin) {
-    super(app, plugin);
-    this.plugin = plugin;
-    this.providerView = new CcSwitchProviderSettingsView({
-      app,
-      getSettings: () => this.plugin.settings,
-      updateSettings: async (patch) => {
-        Object.assign(this.plugin.settings, patch);
-        await this.plugin.saveData(this.plugin.settings);
-      },
-      rerender: () => this.display(),
-      onBack: () => {
-        this.page = "settings";
-        this.display();
-      }
-    });
-  }
-  display() {
-    const { containerEl } = this;
-    containerEl.addClass("video-summarizer-settings-tab");
-    containerEl.empty();
-    containerEl.createEl("h2", { text: "Video Summarizer" });
-    if (this.page === "providers") {
-      this.providerView.render(containerEl);
-      return;
+    if (this.taskState) {
+      this.taskState.status = "cancelled";
+      this.taskState.stage = "\u4EFB\u52A1\u5DF2\u53D6\u6D88";
     }
-    const openProviders = () => {
-      this.page = "providers";
-      this.providerView.showProviderList();
-      this.display();
-    };
-    const providerSetting = new import_obsidian3.Setting(containerEl).setName("\u4F9B\u5E94\u5546").setDesc(this.providerDescription()).addExtraButton(
-      (button) => button.setIcon("chevron-right").setTooltip("\u6253\u5F00\u4F9B\u5E94\u5546\u8BBE\u7F6E").onClick(openProviders)
-    );
-    providerSetting.settingEl.addClass("video-summarizer-navigation-setting");
-    providerSetting.settingEl.setAttribute("role", "button");
-    providerSetting.settingEl.tabIndex = 0;
-    providerSetting.settingEl.addEventListener("click", (event) => {
-      if (event.target.closest("button")) return;
-      openProviders();
-    });
-    providerSetting.settingEl.addEventListener("keydown", (event) => {
-      if (event.key !== "Enter" && event.key !== " ") return;
-      event.preventDefault();
-      openProviders();
-    });
-    new import_obsidian3.Setting(containerEl).setName("\u9879\u76EE\u76EE\u5F55").setDesc("\u5305\u542B src/pipeline.py \u7684 Video Summarizer \u76EE\u5F55").addText(
-      (text) => text.setPlaceholder("D:\\AIApp\\video-summarizer").setValue(this.plugin.settings.projectPath).onChange(async (value) => {
-        this.plugin.settings.projectPath = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Python \u8DEF\u5F84").setDesc("\u7559\u7A7A\u65F6\u4F18\u5148\u4F7F\u7528\u9879\u76EE .venv\uFF0C\u968F\u540E\u4F7F\u7528 PATH \u4E2D\u7684 python").addText(
-      (text) => text.setValue(this.plugin.settings.pythonPath).onChange(async (value) => {
-        this.plugin.settings.pythonPath = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939").addText(
-      (text) => text.setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
-        this.plugin.settings.targetFolder = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
-      })
-    );
-    new import_obsidian3.Setting(containerEl).setName("\u5B8C\u6210\u540E\u6E05\u7406\u5A92\u4F53").setDesc("\u5220\u9664\u8F93\u51FA\u76EE\u5F55\u4E2D\u7684\u4E0B\u8F7D\u5A92\u4F53\u548C\u97F3\u8F68\uFF0C\u4E0D\u5220\u9664\u672C\u5730\u8F93\u5165\u6587\u4EF6").addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.cleanupMedia).onChange(async (value) => {
-        this.plugin.settings.cleanupMedia = value;
-        await this.plugin.saveData(this.plugin.settings);
-      })
-    );
-  }
-  showHome() {
-    this.page = "settings";
-    this.providerView.showProviderList();
-  }
-  showProviders() {
-    this.page = "providers";
-    this.providerView.showProviderList();
-  }
-  providerDescription() {
-    const settings = this.plugin.settings;
-    if (settings.providerSource === "environment") return "\u4F7F\u7528\u9879\u76EE\u73AF\u5883\u53D8\u91CF\u914D\u7F6E";
-    try {
-      const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
-      const provider = settings.ccSwitchFollowCurrent ? providers.find(
-        (item) => item.appType === settings.ccSwitchAppType && item.isCurrent
-      ) : providers.find(
-        (item) => item.appType === settings.ccSwitchAppType && item.id === settings.ccSwitchProviderId
-      );
-      const mode = settings.ccSwitchFollowCurrent ? "\u8DDF\u968F\u5168\u5C40\u5F53\u524D" : "\u5DF2\u56FA\u5B9A";
-      return provider ? `cc-switch \xB7 ${provider.name} \xB7 ${mode}` : `cc-switch \xB7 ${settings.ccSwitchAppType} \xB7 \u914D\u7F6E\u9700\u8981\u68C0\u67E5`;
-    } catch {
-      return "cc-switch \xB7 \u65E0\u6CD5\u8BFB\u53D6\u6570\u636E\u5E93";
-    }
-  }
-  hide() {
-    this.showHome();
+    this.setStatus("VideoMemo: \u5DF2\u53D6\u6D88");
+    this.progressModal?.refresh();
+    if (showNotice) new import_obsidian6.Notice("\u5DF2\u53D6\u6D88\u89C6\u9891\u603B\u7ED3\u4EFB\u52A1");
   }
 };
 /*! Bundled license information:

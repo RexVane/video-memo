@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $obsidianDir -PathType Container)) {
     throw "Not an Obsidian vault (missing .obsidian): $vault"
 }
 
-$pluginDir = Join-Path $obsidianDir "plugins\video-summarizer"
+$pluginDir = Join-Path $obsidianDir "plugins\video-memo"
 New-Item -ItemType Directory -Force -Path $pluginDir | Out-Null
 foreach ($name in @("main.js", "manifest.json", "styles.css", "LICENSE", "NOTICE")) {
     $source = Join-Path $PSScriptRoot $name
@@ -21,4 +21,4 @@ foreach ($name in @("main.js", "manifest.json", "styles.css", "LICENSE", "NOTICE
     Copy-Item -LiteralPath $source -Destination (Join-Path $pluginDir $name) -Force
 }
 
-Write-Output "Installed Video Summarizer plugin to: $pluginDir"
+Write-Output "Installed VideoMemo plugin to: $pluginDir"
