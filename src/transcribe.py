@@ -4,13 +4,19 @@ from __future__ import annotations
 
 import ctypes
 import gc
+import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from cancellation import CancellationSignal, check_cancelled
+
 StatusCb = Callable[[str], None]
 ProgressCb = Callable[[float], None]
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DEFAULT_WHISPER_MODEL_DIR = PROJECT_ROOT / "models" / "faster-whisper"
 
 
 @dataclass
@@ -36,13 +42,28 @@ def _fmt_ts(seconds: float) -> str:
     return f"{m:02d}:{sec:02d}"
 
 
+def get_whisper_model_dir() -> Path:
+    configured = os.getenv("WHISPER_MODEL_DIR", "").strip()
+    model_dir = Path(configured).expanduser() if configured else DEFAULT_WHISPER_MODEL_DIR
+    if not model_dir.is_absolute():
+        model_dir = PROJECT_ROOT / model_dir
+    return model_dir.resolve()
+
+
 def _cuda_runtime_status() -> tuple[bool, str | None]:
     try:
         import ctranslate2
     except ImportError:
         return False, "未安装 CTranslate2"
 
-    if ctranslate2.get_cuda_device_count() < 1:
+    try:
+        cuda_device_count = ctranslate2.get_cuda_device_count()
+    except Exception as error:
+        # A broken CUDA installation can fail while probing, before Whisper
+        # gets a chance to fall back to CPU. Treat that as an unavailable GPU.
+        return False, f"CUDA 检测失败: {error}"
+
+    if cuda_device_count < 1:
         return False, "未检测到 CUDA 设备"
 
     if sys.platform == "win32":
@@ -83,9 +104,17 @@ def _transcribe_once(
     language: str | None,
     device: str,
     compute_type: str,
+    model_dir: Path,
     on_progress: ProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> Transcript:
-    model = model_factory(model_size, device=device, compute_type=compute_type)
+    check_cancelled(cancel_event)
+    model = model_factory(
+        model_size,
+        device=device,
+        compute_type=compute_type,
+        download_root=str(model_dir),
+    )
     segments_iter, info = model.transcribe(
         str(audio_path),
         language=language,
@@ -98,6 +127,7 @@ def _transcribe_once(
     duration = float(getattr(info, "duration", 0.0) or 0.0)
     last_percent = -2
     for seg in segments_iter:
+        check_cancelled(cancel_event)
         if on_progress and duration > 0:
             percent = min(100, int((seg.end / duration) * 100))
             if percent >= last_percent + 2:
@@ -126,6 +156,7 @@ def transcribe(
     device: str = "auto",
     on_status: StatusCb | None = None,
     on_progress: ProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> Transcript:
     """
     Transcribe audio.
@@ -134,10 +165,14 @@ def transcribe(
     """
     from faster_whisper import WhisperModel
 
+    check_cancelled(cancel_event)
     if not audio_path.is_file():
         raise FileNotFoundError(f"音频文件不存在: {audio_path}")
     if device not in {"auto", "cpu", "cuda"}:
         raise ValueError("device 必须是 auto、cpu 或 cuda")
+
+    model_dir = get_whisper_model_dir()
+    model_dir.mkdir(parents=True, exist_ok=True)
 
     def status(message: str) -> None:
         if on_status:
@@ -155,7 +190,9 @@ def transcribe(
                     language,
                     "cuda",
                     "float16",
+                    model_dir,
                     on_progress,
+                    cancel_event,
                 )
             except Exception as error:
                 if not _is_cuda_runtime_error(error):
@@ -176,7 +213,9 @@ def transcribe(
         language,
         device,
         compute_type,
+        model_dir,
         on_progress,
+        cancel_event,
     )
 
 

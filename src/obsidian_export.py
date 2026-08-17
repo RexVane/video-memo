@@ -16,11 +16,11 @@ from download import AUDIO_EXTS, VIDEO_EXTS, DownloadResult
 def _safe_name(value: str, limit: int = 80) -> str:
     cleaned = re.sub(r"[^\w\u4e00-\u9fff\- ]+", "_", value)
     cleaned = re.sub(r"[ _]+", "_", cleaned).strip("_.")
-    return cleaned[:limit] or "video_summary"
+    return cleaned[:limit] or "videomemo"
 
 
 def _vault_folder(vault: Path, folder: str) -> Path:
-    relative = Path(folder.strip() or "Video Summaries")
+    relative = Path(folder.strip() or "Video Memos")
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Obsidian 目标文件夹必须是 Vault 内的相对路径")
     target = (vault / relative).resolve()
@@ -45,7 +45,7 @@ def export_to_vault(
     metadata: DownloadResult,
     vault_path: Path,
     *,
-    folder: str = "Video Summaries",
+    folder: str = "Video Memos",
 ) -> Path:
     vault = vault_path.expanduser().resolve()
     if not vault.is_dir():

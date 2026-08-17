@@ -5,15 +5,18 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import re
 import shutil
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
+from cancellation import CancellationRequested, CancellationSignal, check_cancelled
 from download import (
     BrowserCookieError,
     DownloadResult,
@@ -32,7 +35,7 @@ from subtitles import transcript_from_vtt
 from transcribe import Transcript, save_transcript, transcribe
 
 ProgressCb = Callable[[str, float], None]
-JSON_EVENT_PREFIX = "@@VIDEO_SUMMARIZER@@"
+JSON_EVENT_PREFIX = "@@VIDEOMEMO@@"
 
 
 def _emit_json_event(event: dict) -> None:
@@ -135,8 +138,12 @@ def _probe_video(
     cookies_file: Path | None,
     progress: ProgressCb,
     language: str | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> tuple[VideoMetadata, str | None]:
+    check_cancelled(cancel_event)
     probe_kwargs = {"preferred_language": language} if language else {}
+    if cancel_event is not None:
+        probe_kwargs["cancel_event"] = cancel_event
     if not cookies_from_browser or cookies_file:
         return (
             probe(
@@ -150,6 +157,8 @@ def _probe_video(
 
     try:
         metadata = probe(url, **probe_kwargs)
+    except CancellationRequested:
+        raise
     except Exception as anonymous_error:
         progress("  匿名访问失败，尝试读取浏览器 Cookie…", 0.03)
         try:
@@ -209,10 +218,12 @@ def _find_reusable_download(
     )
     for info_path in info_files:
         work_dir = info_path.parent
+        info = _read_run_info(work_dir)
+        if not _run_is_complete(work_dir, info):
+            continue
         result = load_download_result(work_dir)
         if not result or _url_identity(result.webpage_url) != target_url:
             continue
-        info = _read_run_info(work_dir)
         if local_source and not _local_source_matches(info, local_source):
             continue
         if whisper_model is not None and not _transcript_cache_compatible(
@@ -230,6 +241,11 @@ def _find_reusable_download(
             max_frames=max_frames,
         ):
             continue
+        # Atomically claim the completed run before returning it. Without the
+        # claim, two processes can both observe a completed directory and then
+        # overwrite its transcript, frames, or report concurrently.
+        if not _claim_reusable_run(work_dir):
+            continue
         return work_dir, result
     return None
 
@@ -242,7 +258,57 @@ def _read_run_info(work_dir: Path) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _update_run_info(work_dir: Path, key: str, value: dict) -> None:
+def _run_is_complete(work_dir: Path, info: dict) -> bool:
+    """Only reuse runs whose final report was written successfully.
+
+    Older output directories have no status field, so a non-empty report is
+    accepted as the legacy completion marker. New runs use an explicit status
+    to keep an in-progress directory out of cache discovery.
+    """
+    summary_path = work_dir / "summary.md"
+    try:
+        has_summary = summary_path.is_file() and summary_path.stat().st_size > 0
+    except OSError:
+        has_summary = False
+    status = info.get("run_status")
+    if status == "complete":
+        return has_summary
+    return status is None and has_summary
+
+
+def _claim_reusable_run(work_dir: Path) -> bool:
+    """Transition a completed run to ``running`` with an atomic claim file."""
+    claim_path = work_dir / ".run.claim"
+    for _ in range(2):
+        try:
+            with claim_path.open("x", encoding="ascii") as handle:
+                handle.write(str(os.getpid()))
+        except FileExistsError:
+            # A crashed process can leave the tiny claim file behind. Claims
+            # normally live for milliseconds, so an old one is safe to clear.
+            try:
+                if time.time() - claim_path.stat().st_mtime > 300:
+                    claim_path.unlink()
+                    continue
+            except OSError:
+                pass
+            return False
+
+        try:
+            latest = _read_run_info(work_dir)
+            if not _run_is_complete(work_dir, latest):
+                return False
+            _update_run_info(work_dir, "run_status", "running")
+            return True
+        finally:
+            try:
+                claim_path.unlink()
+            except FileNotFoundError:
+                pass
+    return False
+
+
+def _update_run_info(work_dir: Path, key: str, value: object) -> None:
     info_path = work_dir / "info.json"
     info = _read_run_info(work_dir)
     if not info:
@@ -346,12 +412,9 @@ def _write_reports(
         "---\n\n"
     )
     summary_path = work / "summary.md"
-    summary_path.write_text(
-        header
-        + summary
-        + "\n",
-        encoding="utf-8",
-    )
+    temporary = summary_path.with_suffix(".md.tmp")
+    temporary.write_text(header + summary + "\n", encoding="utf-8")
+    temporary.replace(summary_path)
     return summary_path
 
 
@@ -362,18 +425,22 @@ def regenerate_report(
     api_key: str | None = None,
     api_base_url: str | None = None,
     obsidian_vault: Path | None = None,
-    obsidian_folder: str = "Video Summaries",
+    obsidian_folder: str = "Video Memos",
     on_progress: ProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> Path:
+    check_cancelled(cancel_event)
     dl = load_download_result(work_dir)
     if not dl:
         raise RuntimeError(f"运行目录缺少完整的下载信息: {work_dir}")
     transcript_path = work_dir / "transcript.txt"
     if not transcript_path.is_file() or transcript_path.stat().st_size == 0:
         raise RuntimeError(f"运行目录缺少转写文件: {transcript_path}")
+    _update_run_info(work_dir, "run_status", "running")
 
     model = (llm_model or default_model()).strip()
     config = resolve_llm_config(model, api_key=api_key, base_url=api_base_url)
+    check_cancelled(cancel_event)
     transcript = Transcript(
         language=None,
         text=transcript_path.read_text(encoding="utf-8"),
@@ -398,6 +465,7 @@ def regenerate_report(
         api_key=config.api_key,
         base_url=config.base_url,
         on_progress=progress,
+        cancel_event=cancel_event,
     )
     summary_path = _write_reports(work_dir, dl, summary)
     if obsidian_vault:
@@ -408,6 +476,7 @@ def regenerate_report(
             folder=obsidian_folder,
         )
         progress(f"OBSIDIAN_NOTE={note_path}", 0.98)
+    _update_run_info(work_dir, "run_status", "complete")
     progress(f"报告已保存: {summary_path}", 1.0)
     return summary_path
 
@@ -427,14 +496,16 @@ def run(
     cookies_file: Path | None = None,
     cleanup_media: bool = False,
     obsidian_vault: Path | None = None,
-    obsidian_folder: str = "Video Summaries",
+    obsidian_folder: str = "Video Memos",
     on_progress: ProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> Path:
     def progress(msg: str, pct: float) -> None:
         print(msg)
         if on_progress:
             on_progress(msg, pct)
 
+    check_cancelled(cancel_event)
     url = url.strip()
     out_root = out_root.expanduser().resolve()
     local_source = local_media_path(url)
@@ -447,6 +518,7 @@ def run(
         api_base_url=api_base_url,
         require_downloader=local_source is None,
     )
+    check_cancelled(cancel_event)
 
     if local_source:
         progress(f"[1/4] 使用本地文件: {local_source}", 0.02)
@@ -465,7 +537,10 @@ def run(
         else:
             work = _work_dir(out_root, local_source.stem)
             progress(f"[1/4] 提取音轨…\n  工作目录: {work}", 0.05)
-            dl = import_local_media(local_source, work)
+            import_kwargs = (
+                {"cancel_event": cancel_event} if cancel_event is not None else {}
+            )
+            dl = import_local_media(local_source, work, **import_kwargs)
     else:
         progress("[1/4] 获取视频信息…", 0.02)
         metadata, effective_browser_cookies = _probe_video(
@@ -474,6 +549,7 @@ def run(
             cookies_file=cookies_file,
             progress=progress,
             language=language,
+            cancel_event=cancel_event,
         )
         reusable = _find_reusable_download(
             out_root,
@@ -495,7 +571,14 @@ def run(
                 metadata=metadata,
                 cookies_from_browser=effective_browser_cookies,
                 cookies_file=cookies_file,
+                **(
+                    {"cancel_event": cancel_event}
+                    if cancel_event is not None
+                    else {}
+                ),
             )
+    check_cancelled(cancel_event)
+    _update_run_info(work, "run_status", "running")
     progress(f"  标题: {dl.title}", 0.25)
     if dl.duration:
         progress(f"  时长: {dl.duration:.0f}s", 0.28)
@@ -508,6 +591,7 @@ def run(
         whisper_model=whisper_model,
         language=language,
     ):
+        check_cancelled(cancel_event)
         progress("[2/4] 复用已有语音转写", 0.55)
         tr = Transcript(
             language=language,
@@ -554,6 +638,11 @@ def run(
                     f"  转写进度: {fraction:.0%}",
                     0.32 + (fraction * 0.22),
                 ),
+                **(
+                    {"cancel_event": cancel_event}
+                    if cancel_event is not None
+                    else {}
+                ),
             )
             save_transcript(tr, transcript_path)
             _update_run_info(
@@ -567,6 +656,7 @@ def run(
                 },
             )
     else:
+        check_cancelled(cancel_event)
         progress(f"[2/4] 语音转写 (Whisper {whisper_model})…", 0.30)
         if not dl.audio_path:
             raise RuntimeError("运行目录缺少可用音轨，无法进行 Whisper 转写")
@@ -578,6 +668,11 @@ def run(
             on_progress=lambda fraction: progress(
                 f"  转写进度: {fraction:.0%}",
                 0.32 + (fraction * 0.22),
+            ),
+            **(
+                {"cancel_event": cancel_event}
+                if cancel_event is not None
+                else {}
             ),
         )
         save_transcript(tr, transcript_path)
@@ -592,6 +687,7 @@ def run(
             },
         )
     progress(f"  语言: {tr.language or 'auto'} | 字数约: {len(tr.text)}", 0.55)
+    check_cancelled(cancel_event)
 
     frame_paths: list[Path] = []
     vision_capacity: int | None = None
@@ -604,11 +700,17 @@ def run(
                 work / "frames",
                 max_frames=max_frames,
                 duration=dl.duration,
+                **(
+                    {"cancel_event": cancel_event}
+                    if cancel_event is not None
+                    else {}
+                ),
             )
             if frame_paths:
                 vision_capacity = max_frames
             progress(f"  得到 {len(frame_paths)} 帧", 0.70)
         except Exception as e:
+            check_cancelled(cancel_event)
             progress(f"  抽帧跳过: {e}", 0.70)
             frame_paths = [path for path in existing_frames if path.is_file()][
                 :max_frames
@@ -626,6 +728,7 @@ def run(
         progress(f"[3/4] 复用已有关键帧 ({len(frame_paths)} 张)", 0.70)
     else:
         progress("[3/4] 跳过画面分析", 0.70)
+    check_cancelled(cancel_event)
     if not no_vision and frame_paths and vision_capacity is not None:
         _update_run_info(
             work,
@@ -654,7 +757,9 @@ def run(
             f"  {message}",
             0.76 + (fraction * 0.18),
         ),
+        cancel_event=cancel_event,
     )
+    check_cancelled(cancel_event)
     summary_path = _write_reports(work, dl, summary)
     if obsidian_vault:
         note_path = export_to_vault(
@@ -671,6 +776,7 @@ def run(
             f"{removed_bytes / (1024 * 1024):.1f} MB",
             0.96,
         )
+    _update_run_info(work, "run_status", "complete")
     progress("\n" + "=" * 60, 0.97)
     progress("=" * 60, 0.98)
     progress(f"\n详细总结: {summary_path}", 1.0)
@@ -737,8 +843,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--obsidian-folder",
-        default="Video Summaries",
-        help="Vault 内的目标文件夹（默认 Video Summaries）",
+        default="Video Memos",
+        help="Vault 内的目标文件夹（默认 Video Memos）",
     )
     p.add_argument(
         "--json-progress",

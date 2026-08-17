@@ -46,7 +46,7 @@ class ObsidianExportTests(unittest.TestCase):
             self.assertIn("  - video-summary", content)
             self.assertIn('source: "https://example.test/course"', content)
             self.assertIn("# Course", content)
-            self.assertIn("![[Video Summaries/assets/", content)
+            self.assertIn("![[Video Memos/assets/", content)
             copied_frames = list((note.parent / "assets").rglob("frame_001.jpg"))
             self.assertEqual(len(copied_frames), 1)
 

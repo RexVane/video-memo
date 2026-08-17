@@ -3,24 +3,68 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
-from dataclasses import dataclass
+import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
+from typing import Mapping
+from urllib.parse import urlsplit
 
+import fast_download
+from cancellation import (
+    CancellationRequested,
+    CancellationSignal,
+    check_cancelled,
+    run_command,
+)
+
+
+FORMAT_SELECTOR = "bv*[height<=1080]+ba/bv*+ba/b"
 
 VIDEO_EXTS = {
     ".mp4", ".mkv", ".webm", ".mov", ".avi", ".flv",
-    ".m4v", ".ts", ".mpg", ".mpeg", ".wmv",
+    ".m4v", ".ts", ".mpg", ".mpeg", ".wmv", ".3gp",
+    ".3g2", ".f4v", ".ogv",
 }
 AUDIO_EXTS = {
     ".mp3", ".wav", ".m4a", ".flac", ".aac", ".ogg",
-    ".opus", ".wma", ".amr", ".aiff",
+    ".opus", ".wma", ".amr", ".aiff", ".mka", ".oga",
+    ".weba", ".mpga",
 }
 MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
+_TRANSFER_EXTS = {ext.removeprefix(".") for ext in MEDIA_EXTS}
+_DIRECT_PROTOCOLS = {"http", "https"}
+_FAST_PREFIX = ".fast-download-"
 
 
 class BrowserCookieError(RuntimeError):
     """Raised when yt-dlp cannot read a browser cookie database."""
+
+
+@dataclass(frozen=True)
+class MediaPart:
+    url: str
+    ext: str
+    protocol: str
+    vcodec: str
+    acodec: str
+    http_headers: Mapping[str, str] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "http_headers",
+            MappingProxyType(dict(self.http_headers)),
+        )
+
+
+@dataclass(frozen=True)
+class MediaTransferPlan:
+    video: MediaPart | None = None
+    audio: MediaPart | None = None
+    progressive: MediaPart | None = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +76,11 @@ class VideoMetadata:
     uploader: str
     subtitle_language: str | None = None
     subtitle_automatic: bool = False
+    transfer_plan: MediaTransferPlan | None = field(
+        default=None,
+        compare=False,
+        repr=False,
+    )
 
 
 @dataclass
@@ -134,10 +183,12 @@ def cleanup_media_files(
 
 
 def _language_matches(code: str, preferred: str) -> bool:
-    normalized_code = code.lower().replace("_", "-")
-    normalized_preferred = preferred.lower().replace("_", "-")
-    return normalized_code == normalized_preferred or normalized_code.startswith(
-        normalized_preferred + "-"
+    normalized_code = code.strip().lower().replace("_", "-")
+    normalized_preferred = preferred.strip().lower().replace("_", "-")
+    return (
+        normalized_code == normalized_preferred
+        or normalized_code.startswith(normalized_preferred + "-")
+        or normalized_preferred.startswith(normalized_code + "-")
     )
 
 
@@ -188,6 +239,86 @@ def _select_subtitle_track(
     return None
 
 
+def _media_part(format_info: object) -> MediaPart | None:
+    if not isinstance(format_info, dict):
+        return None
+    url = format_info.get("url")
+    protocol = str(format_info.get("protocol") or "").strip().casefold()
+    ext = str(format_info.get("ext") or "").strip().casefold().removeprefix(".")
+    vcodec = str(format_info.get("vcodec") or "none").strip()
+    acodec = str(format_info.get("acodec") or "none").strip()
+    try:
+        parsed_url = urlsplit(url) if isinstance(url, str) else None
+        port = parsed_url.port if parsed_url is not None else None
+    except ValueError:
+        return None
+    if (
+        not isinstance(url, str)
+        or url != url.strip()
+        or parsed_url is None
+        or parsed_url.scheme.casefold() not in _DIRECT_PROTOCOLS
+        or not parsed_url.hostname
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+        or protocol not in _DIRECT_PROTOCOLS
+        or ext not in _TRANSFER_EXTS
+    ):
+        return None
+    del port  # Access validates malformed port values.
+
+    raw_headers = format_info.get("http_headers")
+    headers: dict[str, str] = {}
+    if isinstance(raw_headers, dict):
+        headers = {
+            name: value
+            for name, value in raw_headers.items()
+            if isinstance(name, str) and isinstance(value, str)
+        }
+    return MediaPart(
+        url=url,
+        ext=ext,
+        protocol=protocol,
+        vcodec=vcodec,
+        acodec=acodec,
+        http_headers=headers,
+    )
+
+
+def _build_transfer_plan(info: object) -> MediaTransferPlan | None:
+    """Build a conservative direct-HTTP plan from yt-dlp's selected formats."""
+    if not isinstance(info, dict):
+        return None
+    requested = info.get("requested_formats")
+    if requested is not None:
+        if not isinstance(requested, list) or len(requested) != 2:
+            return None
+        parts = [_media_part(value) for value in requested]
+        if any(part is None for part in parts):
+            return None
+        video_parts = [
+            part
+            for part in parts
+            if part is not None
+            and part.vcodec.casefold() != "none"
+            and part.acodec.casefold() == "none"
+        ]
+        audio_parts = [
+            part
+            for part in parts
+            if part is not None
+            and part.acodec.casefold() != "none"
+            and part.vcodec.casefold() == "none"
+        ]
+        if len(video_parts) != 1 or len(audio_parts) != 1:
+            return None
+        return MediaTransferPlan(video=video_parts[0], audio=audio_parts[0])
+
+    progressive = _media_part(info)
+    if progressive is None or progressive.acodec.casefold() == "none":
+        return None
+    return MediaTransferPlan(progressive=progressive)
+
+
 def _cookie_args(
     cookies_from_browser: str | None = None,
     cookies_file: Path | None = None,
@@ -221,6 +352,7 @@ def probe(
     cookies_from_browser: str | None = None,
     cookies_file: Path | None = None,
     preferred_language: str | None = None,
+    cancel_event: CancellationSignal | None = None,
 ) -> VideoMetadata:
     """Fetch video metadata without downloading the media."""
     if not url.strip():
@@ -232,11 +364,15 @@ def probe(
         "--dump-single-json",
         "--no-playlist",
         "--no-warnings",
+        "-f",
+        FORMAT_SELECTOR,
         *cookie,
         url,
     ]
-    meta = subprocess.run(
+    meta = run_command(
         meta_cmd,
+        cancel_event=cancel_event,
+        run=subprocess.run,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -269,12 +405,18 @@ def probe(
         uploader=info.get("uploader") or info.get("channel") or "",
         subtitle_language=subtitle[0] if subtitle else None,
         subtitle_automatic=subtitle[1] if subtitle else False,
+        transfer_plan=_build_transfer_plan(info),
     )
 
 
-def _extract_wav(source: Path, audio_path: Path) -> None:
+def _extract_wav(
+    source: Path,
+    audio_path: Path,
+    *,
+    cancel_event: CancellationSignal | None = None,
+) -> None:
     """Extract mono 16k wav for ASR."""
-    ff = subprocess.run(
+    ff = run_command(
         [
             "ffmpeg",
             "-y",
@@ -289,6 +431,8 @@ def _extract_wav(source: Path, audio_path: Path) -> None:
             "wav",
             str(audio_path),
         ],
+        cancel_event=cancel_event,
+        run=subprocess.run,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -298,10 +442,14 @@ def _extract_wav(source: Path, audio_path: Path) -> None:
         raise RuntimeError(f"提取音频失败:\n{(ff.stderr or '')[-2000:]}")
 
 
-def probe_media_duration(path: Path) -> float | None:
+def probe_media_duration(
+    path: Path,
+    *,
+    cancel_event: CancellationSignal | None = None,
+) -> float | None:
     """Read media duration in seconds via ffprobe; None when unavailable."""
     try:
-        proc = subprocess.run(
+        proc = run_command(
             [
                 "ffprobe",
                 "-v",
@@ -312,6 +460,8 @@ def probe_media_duration(path: Path) -> float | None:
                 "default=noprint_wrappers=1:nokey=1",
                 str(path),
             ],
+            cancel_event=cancel_event,
+            run=subprocess.run,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -328,7 +478,12 @@ def probe_media_duration(path: Path) -> float | None:
     return duration if duration > 0 else None
 
 
-def import_local_media(source: Path, work_dir: Path) -> DownloadResult:
+def import_local_media(
+    source: Path,
+    work_dir: Path,
+    *,
+    cancel_event: CancellationSignal | None = None,
+) -> DownloadResult:
     """Use a local video/audio file as pipeline source without copying it."""
     source = source.expanduser().resolve()
     if not source.is_file():
@@ -340,10 +495,10 @@ def import_local_media(source: Path, work_dir: Path) -> DownloadResult:
 
     work_dir.mkdir(parents=True, exist_ok=True)
     source_stat = source.stat()
-    duration = probe_media_duration(source)
+    duration = probe_media_duration(source, cancel_event=cancel_event)
     video_path = source if ext in VIDEO_EXTS else None
     audio_path = work_dir / "audio.wav"
-    _extract_wav(source, audio_path)
+    _extract_wav(source, audio_path, cancel_event=cancel_event)
 
     (work_dir / "info.json").write_text(
         json.dumps(
@@ -382,46 +537,59 @@ def import_local_media(source: Path, work_dir: Path) -> DownloadResult:
     )
 
 
-def download(
-    url: str,
-    work_dir: Path,
+def _subtitle_args(video_info: VideoMetadata) -> list[str]:
+    if not video_info.subtitle_language:
+        return []
+    return [
+        "--write-auto-subs" if video_info.subtitle_automatic else "--write-subs",
+        "--sub-langs",
+        video_info.subtitle_language,
+        "--sub-format",
+        "vtt/best",
+        "--convert-subs",
+        "vtt",
+    ]
+
+
+def _run_yt_dlp(
+    command: list[str],
     *,
-    metadata: VideoMetadata | None = None,
-    cookies_from_browser: str | None = None,
-    cookies_file: Path | None = None,
-) -> DownloadResult:
-    """Download best mp4 (or best) + extract wav audio into work_dir."""
-    work_dir.mkdir(parents=True, exist_ok=True)
-    info_json = work_dir / "info.json"
-    out_tmpl = str(work_dir / "source.%(ext)s")
-    cookie = _cookie_args(cookies_from_browser, cookies_file)
-    video_info = metadata or probe(
-        url,
-        cookies_from_browser=cookies_from_browser,
-        cookies_file=cookies_file,
+    cookies_from_browser: str | None,
+    cancel_event: CancellationSignal | None,
+) -> subprocess.CompletedProcess:
+    result = run_command(
+        command,
+        cancel_event=cancel_event,
+        run=subprocess.run,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    if result.returncode != 0:
+        error = result.stderr or result.stdout
+        _raise_cookie_error_if_needed(error, cookies_from_browser)
+        raise RuntimeError(f"下载失败:\n{error}")
+    return result
 
-    subtitle_args: list[str] = []
-    if video_info.subtitle_language:
-        subtitle_args = [
-            "--write-auto-subs" if video_info.subtitle_automatic else "--write-subs",
-            "--sub-langs",
-            video_info.subtitle_language,
-            "--sub-format",
-            "vtt/best",
-            "--convert-subs",
-            "vtt",
-        ]
 
-    # Prefer a single file with video+audio; fall back to best
-    dl_cmd = [
+def _full_download_command(
+    url: str,
+    out_tmpl: str,
+    subtitle_args: list[str],
+    cookie: list[str],
+) -> list[str]:
+    # Key frames are downscaled before upload, so prefer at most 1080p.
+    return [
         "yt-dlp",
         "--no-playlist",
         "--no-warnings",
         "-f",
-        "bv*+ba/b",
+        FORMAT_SELECTOR,
         "--merge-output-format",
         "mp4",
+        "--concurrent-fragments",
+        "4",
         "-o",
         out_tmpl,
         "--write-info-json",
@@ -431,51 +599,357 @@ def download(
         *cookie,
         url,
     ]
-    dl = subprocess.run(
-        dl_cmd,
+
+
+def _subtitle_download_command(
+    url: str,
+    out_tmpl: str,
+    subtitle_args: list[str],
+    cookie: list[str],
+) -> list[str]:
+    return [
+        "yt-dlp",
+        "--no-playlist",
+        "--no-warnings",
+        "--skip-download",
+        "-o",
+        out_tmpl,
+        *subtitle_args,
+        *cookie,
+        url,
+    ]
+
+
+def _remove_fast_paths(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            Path(f"{path}.part").unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _snapshot_source_files(work_dir: Path) -> dict[Path, tuple[int, int]]:
+    snapshot: dict[Path, tuple[int, int]] = {}
+    for path in work_dir.glob("source*"):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        snapshot[path.resolve()] = (stat.st_mtime_ns, stat.st_size)
+    return snapshot
+
+
+def _changed_source_files(
+    work_dir: Path,
+    before: dict[Path, tuple[int, int]],
+    pattern: str,
+) -> list[Path]:
+    changed: list[Path] = []
+    for path in work_dir.glob(pattern):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        if before.get(path.resolve()) != (stat.st_mtime_ns, stat.st_size):
+            changed.append(path)
+    return changed
+
+
+def _new_source_files(
+    work_dir: Path,
+    before: dict[Path, tuple[int, int]],
+    pattern: str,
+) -> list[Path]:
+    return [
+        path
+        for path in work_dir.glob(pattern)
+        if path.is_file() and path.resolve() not in before
+    ]
+
+
+def _checked_fast_destination(work_dir: Path, name: str) -> Path:
+    path = work_dir / name
+    if path.parent.resolve() != work_dir.resolve():
+        raise RuntimeError("高速下载输出路径无效")
+    return path
+
+
+def _commit_progressive(
+    part: MediaPart,
+    work_dir: Path,
+    created_paths: list[Path],
+    *,
+    cancel_event: CancellationSignal | None,
+) -> Path:
+    staged = _checked_fast_destination(
+        work_dir,
+        f"{_FAST_PREFIX}{uuid.uuid4().hex}.{part.ext}",
+    )
+    final = _checked_fast_destination(work_dir, f"source.{part.ext}")
+    created_paths.append(staged)
+    fast_download.download_http(
+        part.url,
+        staged,
+        headers=part.http_headers,
+        cancel_event=cancel_event,
+    )
+    check_cancelled(cancel_event)
+    if not staged.is_file() or staged.stat().st_size <= 0:
+        raise RuntimeError("高速下载完成但媒体文件为空")
+    if final.exists():
+        raise FileExistsError(f"目标媒体文件已存在: {final}")
+    os.replace(staged, final)
+    created_paths.append(final)
+    if not final.is_file() or final.stat().st_size <= 0:
+        raise RuntimeError("高速下载完成但未找到媒体文件")
+    return final
+
+
+def _commit_separate(
+    plan: MediaTransferPlan,
+    work_dir: Path,
+    created_paths: list[Path],
+    *,
+    cancel_event: CancellationSignal | None,
+) -> Path:
+    if plan.video is None or plan.audio is None:
+        raise RuntimeError("高速下载计划缺少音视频流")
+    token = uuid.uuid4().hex
+    video = _checked_fast_destination(
+        work_dir,
+        f"{_FAST_PREFIX}{token}-video.{plan.video.ext}",
+    )
+    audio = _checked_fast_destination(
+        work_dir,
+        f"{_FAST_PREFIX}{token}-audio.{plan.audio.ext}",
+    )
+    merged = _checked_fast_destination(
+        work_dir,
+        f"{_FAST_PREFIX}{token}-merged.mp4",
+    )
+    final = _checked_fast_destination(work_dir, "source.mp4")
+    created_paths.extend([video, audio, merged])
+    fast_download.download_http(
+        plan.video.url,
+        video,
+        headers=plan.video.http_headers,
+        cancel_event=cancel_event,
+    )
+    fast_download.download_http(
+        plan.audio.url,
+        audio,
+        headers=plan.audio.http_headers,
+        cancel_event=cancel_event,
+    )
+    merge = run_command(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(video),
+            "-i",
+            str(audio),
+            "-c",
+            "copy",
+            str(merged),
+        ],
+        cancel_event=cancel_event,
+        run=subprocess.run,
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
     )
-    if dl.returncode != 0:
-        err = dl.stderr or dl.stdout
-        _raise_cookie_error_if_needed(err, cookies_from_browser)
-        raise RuntimeError(f"下载失败:\n{err}")
+    if merge.returncode != 0 or not merged.is_file() or merged.stat().st_size <= 0:
+        raise RuntimeError(f"合并音视频失败:\n{(merge.stderr or '')[-2000:]}")
+    check_cancelled(cancel_event)
+    if final.exists():
+        raise FileExistsError(f"目标媒体文件已存在: {final}")
+    os.replace(merged, final)
+    created_paths.append(final)
+    if not final.is_file() or final.stat().st_size <= 0:
+        raise RuntimeError("高速下载完成但未找到媒体文件")
+    _remove_fast_paths([video, audio])
+    return final
 
-    # Locate downloaded media
+
+def _fast_download_media(
+    plan: MediaTransferPlan,
+    work_dir: Path,
+    created_paths: list[Path],
+    *,
+    cancel_event: CancellationSignal | None,
+) -> Path:
+    if plan.progressive is not None and plan.video is None and plan.audio is None:
+        return _commit_progressive(
+            plan.progressive,
+            work_dir,
+            created_paths,
+            cancel_event=cancel_event,
+        )
+    if plan.progressive is None and plan.video is not None and plan.audio is not None:
+        return _commit_separate(
+            plan,
+            work_dir,
+            created_paths,
+            cancel_event=cancel_event,
+        )
+    raise RuntimeError("高速下载计划无效")
+
+
+def _stdout_media_path(stdout: str, work_dir: Path) -> Path | None:
+    root = work_dir.resolve()
+    for line in reversed(stdout.splitlines()):
+        value = line.strip()
+        if not value:
+            continue
+        try:
+            candidate = Path(value)
+            candidate = candidate if candidate.is_absolute() else work_dir / candidate
+            resolved = candidate.resolve()
+        except (OSError, ValueError):
+            continue
+        if (
+            resolved.is_relative_to(root)
+            and resolved.is_file()
+            and resolved.stat().st_size > 0
+            and resolved.suffix.lower() in MEDIA_EXTS
+            and not resolved.name.startswith(_FAST_PREFIX)
+        ):
+            return resolved
+    return None
+
+
+def _locate_downloaded_media(work_dir: Path, stdout: str = "") -> Path:
+    printed = _stdout_media_path(stdout, work_dir)
+    if printed is not None:
+        return printed
     candidates = sorted(
         [
-            p
-            for p in work_dir.iterdir()
-            if p.name != "audio.wav"
-            and p.suffix.lower()
-            in {".mp4", ".mkv", ".webm", ".mov", ".m4a", ".mp3", ".wav"}
+            path
+            for path in work_dir.iterdir()
+            if path.is_file()
+            and path.name != "audio.wav"
+            and not path.name.startswith(_FAST_PREFIX)
+            and path.suffix.lower() in MEDIA_EXTS
         ],
-        key=lambda p: p.stat().st_mtime,
+        key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
     if not candidates:
         raise RuntimeError("下载完成但未找到媒体文件")
+    return candidates[0]
 
-    video_path: Path | None = None
-    source = candidates[0]
-    if source.suffix.lower() in {".mp4", ".mkv", ".webm", ".mov"}:
-        video_path = source
 
-    # Extract mono 16k wav for ASR
+def download(
+    url: str,
+    work_dir: Path,
+    *,
+    metadata: VideoMetadata | None = None,
+    cookies_from_browser: str | None = None,
+    cookies_file: Path | None = None,
+    cancel_event: CancellationSignal | None = None,
+) -> DownloadResult:
+    """Download best media + extract wav audio into work_dir."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    info_json = work_dir / "info.json"
+    out_tmpl = str(work_dir / "source.%(ext)s")
+    cookie = _cookie_args(cookies_from_browser, cookies_file)
+    video_info = metadata or probe(
+        url,
+        cookies_from_browser=cookies_from_browser,
+        cookies_file=cookies_file,
+        cancel_event=cancel_event,
+    )
+    subtitle_args = _subtitle_args(video_info)
+    full_command = _full_download_command(url, out_tmpl, subtitle_args, cookie)
+
+    source: Path | None = None
+    download_backend = "yt-dlp"
+    fast_paths: list[Path] = []
+    can_use_fast = not cookie and video_info.transfer_plan is not None
+    if can_use_fast:
+        try:
+            source = _fast_download_media(
+                video_info.transfer_plan,
+                work_dir,
+                fast_paths,
+                cancel_event=cancel_event,
+            )
+            if subtitle_args:
+                previous_subtitles = _snapshot_source_files(work_dir)
+                subtitle_command = _subtitle_download_command(
+                    url,
+                    out_tmpl,
+                    subtitle_args,
+                    cookie,
+                )
+                try:
+                    _run_yt_dlp(
+                        subtitle_command,
+                        cookies_from_browser=cookies_from_browser,
+                        cancel_event=cancel_event,
+                    )
+                finally:
+                    fast_paths.extend(
+                        _new_source_files(
+                            work_dir,
+                            previous_subtitles,
+                            "source*.vtt",
+                        )
+                    )
+            download_backend = "range"
+        except CancellationRequested:
+            _remove_fast_paths(fast_paths)
+            raise
+        except Exception:
+            _remove_fast_paths(fast_paths)
+            source = None
+
+    if source is None:
+        existing_sources = _snapshot_source_files(work_dir)
+        full_result = _run_yt_dlp(
+            full_command,
+            cookies_from_browser=cookies_from_browser,
+            cancel_event=cancel_event,
+        )
+        source = _stdout_media_path(full_result.stdout or "", work_dir)
+        if source is None:
+            new_media = [
+                path
+                for path in _changed_source_files(
+                    work_dir,
+                    existing_sources,
+                    "source.*",
+                )
+                if path.name != "audio.wav"
+                and not path.name.startswith(_FAST_PREFIX)
+                and path.suffix.lower() in MEDIA_EXTS
+            ]
+            if new_media:
+                source = max(new_media, key=lambda path: path.stat().st_mtime)
+            else:
+                source = _locate_downloaded_media(work_dir)
+
+    if not source.is_file() or source.stat().st_size <= 0:
+        raise RuntimeError("下载完成但媒体文件为空")
+    video_path = source if source.suffix.lower() in VIDEO_EXTS else None
+
+    # Audio extraction happens after the selected download backend has succeeded.
+    # Its failure must not trigger a second media download.
     audio_path = work_dir / "audio.wav"
     if not (source.suffix.lower() == ".wav" and source.name == "audio.wav"):
-        _extract_wav(source, audio_path)
+        _extract_wav(source, audio_path, cancel_event=cancel_event)
 
     subtitle_candidates = sorted(
-        work_dir.glob("source*.vtt"),
+        [path for path in work_dir.glob("source*.vtt") if path.is_file()],
         key=lambda path: path.stat().st_mtime,
         reverse=True,
     )
     subtitle_path = subtitle_candidates[0] if subtitle_candidates else None
 
-    # Save compact meta
     info_json.write_text(
         json.dumps(
             {
@@ -491,6 +965,7 @@ def download(
                     video_info.subtitle_language if subtitle_path else None
                 ),
                 "media_has_video": video_path is not None,
+                "download_backend": download_backend,
             },
             ensure_ascii=False,
             indent=2,

@@ -1,8 +1,8 @@
 {
-  "name": "obsidian-video-summarizer",
+  "name": "obsidian-video-memo",
   "version": "0.1.0",
   "private": true,
-  "description": "Obsidian desktop shell for the Video Summarizer Python engine",
+  "description": "Obsidian desktop shell for the VideoMemo Python engine",
   "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",

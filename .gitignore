@@ -6,5 +6,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 output/
+models/faster-whisper/
 node_modules/
+.zcode/
 .npm-cache/
