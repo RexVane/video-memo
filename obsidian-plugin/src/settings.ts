@@ -3,7 +3,6 @@ import type { CcSwitchUiSettings } from "./ccswitch-settings";
 
 export interface VideoMemoSettings extends CcSwitchUiSettings {
   projectPath: string;
-  pythonPath: string;
   model: string;
   targetFolder: string;
   cleanupMedia: boolean;
@@ -11,7 +10,6 @@ export interface VideoMemoSettings extends CcSwitchUiSettings {
 
 export const DEFAULT_SETTINGS: VideoMemoSettings = {
   projectPath: "",
-  pythonPath: "",
   providerSource: "ccswitch",
   ccSwitchDbPath: "",
   ccSwitchAppType: "codex",
@@ -29,7 +27,6 @@ export function normalizeSettings(
     typeof value === "string" ? value : fallback;
   return {
     projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
-    pythonPath: stringValue(stored?.pythonPath, DEFAULT_SETTINGS.pythonPath),
     providerSource: stored?.providerSource === "environment" ? "environment" : "ccswitch",
     ccSwitchDbPath: stringValue(stored?.ccSwitchDbPath, DEFAULT_SETTINGS.ccSwitchDbPath),
     ccSwitchAppType: stringValue(stored?.ccSwitchAppType, DEFAULT_SETTINGS.ccSwitchAppType),

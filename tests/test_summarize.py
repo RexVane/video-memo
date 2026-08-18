@@ -69,7 +69,8 @@ class SummarizeTests(unittest.TestCase):
                 model="test-model",
             )
 
-        self.assertEqual(result, "summary")
+        self.assertEqual(result.body, "summary")
+        self.assertEqual(result.note_title, "Course")
         content = chat_mock.call_args.kwargs["messages"][1]["content"]
         self.assertEqual(len(content), 14)
         self.assertEqual(
@@ -260,8 +261,53 @@ class SummarizeTests(unittest.TestCase):
         self.assertIn("~~~mermaid", prompt)
         self.assertNotIn("## 分阶段学习与练习", prompt)
         self.assertNotIn("## 复习清单", prompt)
-        self.assertIn("## 逐章参考笔记", result)
-        self.assertIn("> [!note]- 00:00–01:00｜基础概念", result)
+        self.assertIn("## 逐章参考笔记", result.body)
+        self.assertIn("> [!note]- 00:00–01:00｜基础概念", result.body)
+
+    @patch("summarize._generate_chapter_notes")
+    @patch("summarize._client")
+    def test_note_title_extracted_from_tag(self, client_factory, generate_chapters) -> None:
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            "<<<TITLE>>>Git版本控制核心概念<<<END>>>"
+                            "\n## 一眼看懂\n精华"
+                        )
+                    )
+                )
+            ]
+        )
+        client_factory.return_value = client
+        generate_chapters.return_value = []
+
+        with patch.dict(os.environ, {"LLM_API_FORMAT": ""}):
+            result = summarize.summarize(
+                title="原始视频标题",
+                url="https://example.test",
+                uploader="",
+                description="",
+                transcript="transcript",
+                model="test-model",
+            )
+
+        self.assertEqual(result.note_title, "Git版本控制核心概念")
+        self.assertNotIn("<<<TITLE>>>", result.body)
+        self.assertTrue(result.body.startswith("## 一眼看懂"))
+
+    def test_split_title_falls_back_when_tag_missing(self) -> None:
+        body, title = summarize._split_title("plain content", "Fallback")
+        self.assertEqual(body, "plain content")
+        self.assertEqual(title, "Fallback")
+
+    def test_split_title_handles_multiline_body(self) -> None:
+        raw = "<<<TITLE>>>短标题<<<END>>>\n\n## section\ncontent"
+        body, title = summarize._split_title(raw, "Fallback")
+        self.assertEqual(title, "短标题")
+        self.assertTrue(body.startswith("## section"))
+        self.assertNotIn("<<<TITLE>>>", body)
 
 if __name__ == "__main__":
     unittest.main()
