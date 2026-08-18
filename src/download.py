@@ -834,7 +834,7 @@ def _stdout_media_path(stdout: str, work_dir: Path) -> Path | None:
             and resolved.suffix.lower() in MEDIA_EXTS
             and not resolved.name.startswith(_FAST_PREFIX)
         ):
-            return resolved
+            return candidate
     return None
 
 
