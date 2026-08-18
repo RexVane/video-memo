@@ -23,7 +23,7 @@
     "check": "tsc --noEmit"
   },
   "devDependencies": {
-    "@types/node": "^22.10.0",
+    "@types/node": "^26.2.0",
     "esbuild": "^0.28.2",
     "obsidian": "^1.8.0",
     "typescript": "^5.7.0"
