@@ -17,7 +17,7 @@ Install the built plugin files into a Vault:
 .\install.ps1 -VaultPath "D:\Notes\My Vault"
 ```
 
-Enable the plugin, then set the VideoMemo project directory in Obsidian settings. The installer copies `main.js`, `manifest.json`, `styles.css`, `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; build dependencies remain in the project directory.
+Enable the plugin, then set the VideoMemo project directory in Obsidian settings. Python is detected automatically from the project `.venv`, with PATH `python` as fallback. The installer copies `main.js`, `manifest.json`, `styles.css`, `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; build dependencies remain in the project directory.
 
 Commands:
 
@@ -27,10 +27,14 @@ Commands:
 - `VideoMemo: 打开插件设置`
 - `VideoMemo: 打开供应商设置`
 
-The task dialog separates video links from local media, provides a native file picker, and shows a read-only badge with the provider and model the run will use. The settings home keeps provider, project, Python, Vault, and cleanup options in one list. Opening the provider row enters a read-only cc-switch database page, then a provider detail page whose raw config is collapsed by default. The model dropdown requests the provider's OpenAI-compatible `/models` endpoint with its cc-switch URL and key, with local model fallback. A task can follow the current global cc-switch provider or pin one provider. Secrets are read only for model discovery or when the Python child process starts and are never written to plugin data.
+The task dialog separates video links from local media, provides a native file picker, and shows a read-only badge with the provider and model the run will use. The settings home keeps provider, project, Python, Vault, and cleanup options in one list. Opening the provider row enters provider settings: cc-switch offers a read-only database list and redacted detail page, environment mode delegates to project configuration, and custom mode provides an editable OpenAI-compatible form. cc-switch secrets remain in its database and are read only for model discovery or Python startup; custom keys follow the plaintext local persistence described below.
 
 The plugin launches Python with `shell: false` and streams structured progress into a live progress panel (progress bar, scrolling log, cancel, run-in-background) plus the status bar; clicking the status bar reopens the panel. The Python engine keeps `yt-dlp` as its site parser and subtitle/HLS/DASH downloader; for eligible ordinary HTTP media it may use a validated multi-connection Range transport and transparently falls back to `yt-dlp` when needed. Failures show the stderr tail with one-click copy. The note is exported into the current Vault and opened automatically when processing completes.
 
-The cc-switch database view requires an Obsidian/Electron runtime with `node:sqlite`. On older desktop runtimes, the plugin still loads and can use the environment configuration source.
+Provider settings support a read-only cc-switch database, project environment configuration, and custom OpenAI-compatible providers. A custom provider accepts an API root URL, API key, Chat Completions/Responses format, and model. Refreshing models or testing the connection only sends a Bearer-authenticated GET to the derived `/models` endpoint; it does not invoke a chat model. Enter an API root such as `https://example.com/v1`, not `/chat/completions` or `/responses`.
+
+Custom API keys are stored in plaintext in the current Vault's `.obsidian/plugins/video-memo/data.json` by user choice. They are not placed in command-line arguments, logs, or output files. Do not commit, share, or sync that file to untrusted devices. Use trusted HTTPS services in production; localhost HTTP is supported.
+
+The cc-switch database view requires an Obsidian/Electron runtime with `node:sqlite`. On older desktop runtimes, the plugin still loads and can use the environment or custom provider source.
 
 The cc-switch provider workflow and layout are adapted from [CLI-Manager](https://github.com/dark-hxx/CLI-Manager), Copyright (c) 2026 Chenyme, under AGPL-3.0-or-later. See `NOTICE`, `COPYRIGHT.md`, and `LICENSE`. The corresponding source for a released bundle is published in the `obsidian-plugin/` directory of [RexVane/video-memo](https://github.com/RexVane/video-memo).

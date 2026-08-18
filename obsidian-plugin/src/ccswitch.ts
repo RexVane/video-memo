@@ -63,9 +63,16 @@ export interface CcSwitchProviderRuntime {
   apiKey: string;
 }
 
-export interface CcSwitchModelListResponse {
+export interface OpenAiCompatibleModelsResponse {
   endpoint: string;
   models: string[];
+}
+
+export interface CcSwitchModelListResponse extends OpenAiCompatibleModelsResponse {}
+
+export interface OpenAiCompatibleModelsOptions {
+  baseUrl: string;
+  apiKey: string;
 }
 
 interface ProviderRow extends Record<string, unknown> {
@@ -407,7 +414,7 @@ export function resolveCcSwitchProviderRuntime(options: {
   }
 }
 
-export function openAiModelsUrl(baseUrl: string): string {
+export function normalizeOpenAiBaseUrl(baseUrl: string): string {
   const url = new URL(baseUrl.trim());
   if (!(["http:", "https:"] as string[]).includes(url.protocol)) {
     throw new Error("模型接口 Base URL 必须使用 http 或 https");
@@ -419,6 +426,16 @@ export function openAiModelsUrl(baseUrl: string): string {
     throw new Error("模型接口 Base URL 不能包含查询参数或锚点");
   }
 
+  const path = url.pathname.replace(/\/+$/, "");
+  if (/\/(?:chat\/completions|responses)$/i.test(path)) {
+    throw new Error("模型接口 Base URL 不能以 /chat/completions 或 /responses 结尾");
+  }
+  url.pathname = path || "/";
+  return url.toString();
+}
+
+export function openAiModelsUrl(baseUrl: string): string {
+  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
   const path = url.pathname.replace(/\/+$/, "");
   if (!path) {
     url.pathname = "/v1/models";
@@ -460,18 +477,10 @@ function responseErrorDetail(text: string): string {
   }
 }
 
-export async function fetchCcSwitchProviderModels(options: {
-  dbPath?: string;
-  appType: string;
-  providerId: string;
-}): Promise<CcSwitchModelListResponse> {
-  const runtime = resolveCcSwitchProviderRuntime({
-    dbPath: options.dbPath,
-    appType: options.appType,
-    followCurrent: false,
-    providerId: options.providerId,
-  });
-  const endpoint = openAiModelsUrl(runtime.baseUrl);
+export async function fetchOpenAiCompatibleModels(
+  options: OpenAiCompatibleModelsOptions,
+): Promise<OpenAiCompatibleModelsResponse> {
+  const endpoint = openAiModelsUrl(options.baseUrl);
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const response = await Promise.race([
@@ -480,7 +489,7 @@ export async function fetchCcSwitchProviderModels(options: {
         method: "GET",
         headers: {
           Accept: "application/json",
-          Authorization: `Bearer ${runtime.apiKey}`,
+          Authorization: `Bearer ${options.apiKey}`,
         },
         throw: false,
       }),
@@ -512,8 +521,25 @@ export async function fetchCcSwitchProviderModels(options: {
     return { endpoint, models };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message.replaceAll(runtime.apiKey, "***"));
+    throw new Error(message.replaceAll(options.apiKey, "***"));
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+export async function fetchCcSwitchProviderModels(options: {
+  dbPath?: string;
+  appType: string;
+  providerId: string;
+}): Promise<CcSwitchModelListResponse> {
+  const runtime = resolveCcSwitchProviderRuntime({
+    dbPath: options.dbPath,
+    appType: options.appType,
+    followCurrent: false,
+    providerId: options.providerId,
+  });
+  return fetchOpenAiCompatibleModels({
+    baseUrl: runtime.baseUrl,
+    apiKey: runtime.apiKey,
+  });
 }
