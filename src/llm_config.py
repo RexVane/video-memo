@@ -3,14 +3,20 @@
 from __future__ import annotations
 
 import os
-import tomllib
 from dataclasses import dataclass, field
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10
+    import tomli as tomllib
 from pathlib import Path
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+from project_paths import project_root
+
+PROJECT_ROOT = project_root()
 DEFAULT_BASE_URL = "https://api.x.ai/v1"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 DEFAULT_MODEL = "grok-4.5"

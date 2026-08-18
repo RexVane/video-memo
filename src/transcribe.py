@@ -11,11 +11,12 @@ from pathlib import Path
 from typing import Callable
 
 from cancellation import CancellationSignal, check_cancelled
+from project_paths import project_root
 
 StatusCb = Callable[[str], None]
 ProgressCb = Callable[[float], None]
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = project_root()
 DEFAULT_WHISPER_MODEL_DIR = PROJECT_ROOT / "models" / "faster-whisper"
 
 

@@ -9,4 +9,7 @@ output/
 models/faster-whisper/
 node_modules/
 .zcode/
+build/
+dist/
+*.egg-info/
 .npm-cache/

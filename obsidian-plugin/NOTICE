@@ -7,15 +7,20 @@ https://github.com/dark-hxx/CLI-Manager
 CLI-Manager Copyright (c) 2026 Chenyme.
 CLI-Manager is licensed under AGPL-3.0-or-later.
 
+Copyright 2026 VideoMemo / RexVane.
+
 This adaptation was modified for the VideoMemo Obsidian plugin in 2026.
 The plugin source and bundled object code are distributed under
-AGPL-3.0-or-later. See LICENSE.
+AGPL-3.0-or-later. See LICENSE and COPYRIGHT.md.
+The corresponding source for a released bundle is available at:
+https://github.com/RexVane/video-memo/tree/main/obsidian-plugin
 
 The bundled smol-toml dependency is Copyright (c) Squirrel Chat et al. and is
 licensed under the BSD 3-Clause License.
 
 The Python engine's optional ordinary HTTP Range transport was independently
-implemented after studying the transport design of xiuxiu-downloader:
+implemented after studying the transport design of xiuxiu-downloader. This
+reference applies to the root Python engine, not to plugin source code:
 https://github.com/Melody-YK/xiuxiu-downloader
 The referenced project is Copyright (c) 2026 Melody-YK and is licensed under the
 MIT License. No xiuxiu-downloader source code is bundled in this plugin.

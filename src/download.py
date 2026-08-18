@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import sys
 import uuid
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -37,6 +40,19 @@ MEDIA_EXTS = VIDEO_EXTS | AUDIO_EXTS
 _TRANSFER_EXTS = {ext.removeprefix(".") for ext in MEDIA_EXTS}
 _DIRECT_PROTOCOLS = {"http", "https"}
 _FAST_PREFIX = ".fast-download-"
+
+
+def _yt_dlp_command() -> list[str]:
+    """Resolve yt-dlp in this Python environment, then fall back to PATH."""
+    try:
+        import_module("yt_dlp")
+    except ImportError:
+        if shutil.which("yt-dlp"):
+            return ["yt-dlp"]
+        raise FileNotFoundError(
+            "无法导入当前 Python 环境中的 yt_dlp，且 PATH 中未找到 yt-dlp"
+        )
+    return [sys.executable, "-m", "yt_dlp"]
 
 
 class BrowserCookieError(RuntimeError):
@@ -360,7 +376,7 @@ def probe(
 
     cookie = _cookie_args(cookies_from_browser, cookies_file)
     meta_cmd = [
-        "yt-dlp",
+        *_yt_dlp_command(),
         "--dump-single-json",
         "--no-playlist",
         "--no-warnings",
@@ -581,7 +597,7 @@ def _full_download_command(
 ) -> list[str]:
     # Key frames are downscaled before upload, so prefer at most 1080p.
     return [
-        "yt-dlp",
+        *_yt_dlp_command(),
         "--no-playlist",
         "--no-warnings",
         "-f",
@@ -608,7 +624,7 @@ def _subtitle_download_command(
     cookie: list[str],
 ) -> list[str]:
     return [
-        "yt-dlp",
+        *_yt_dlp_command(),
         "--no-playlist",
         "--no-warnings",
         "--skip-download",
@@ -818,7 +834,7 @@ def _stdout_media_path(stdout: str, work_dir: Path) -> Path | None:
             and resolved.suffix.lower() in MEDIA_EXTS
             and not resolved.name.startswith(_FAST_PREFIX)
         ):
-            return resolved
+            return candidate
     return None
 
 
@@ -864,7 +880,6 @@ def download(
         cancel_event=cancel_event,
     )
     subtitle_args = _subtitle_args(video_info)
-    full_command = _full_download_command(url, out_tmpl, subtitle_args, cookie)
 
     source: Path | None = None
     download_backend = "yt-dlp"
@@ -910,6 +925,12 @@ def download(
 
     if source is None:
         existing_sources = _snapshot_source_files(work_dir)
+        full_command = _full_download_command(
+            url,
+            out_tmpl,
+            subtitle_args,
+            cookie,
+        )
         full_result = _run_yt_dlp(
             full_command,
             cookies_from_browser=cookies_from_browser,

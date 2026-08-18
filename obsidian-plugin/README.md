@@ -6,7 +6,8 @@ Desktop-only Obsidian shell for the Python engine in the parent project.
 
 ```powershell
 cd obsidian-plugin
-npm.cmd install
+npm.cmd ci
+npm.cmd run check
 npm.cmd run build
 ```
 
@@ -16,7 +17,7 @@ Install the built plugin files into a Vault:
 .\install.ps1 -VaultPath "D:\Notes\My Vault"
 ```
 
-Enable the plugin, then set the VideoMemo project directory in Obsidian settings. The installer copies `main.js`, `manifest.json`, `styles.css`, `LICENSE`, and `NOTICE`; build dependencies remain in the project directory.
+Enable the plugin, then set the VideoMemo project directory in Obsidian settings. The installer copies `main.js`, `manifest.json`, `styles.css`, `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; build dependencies remain in the project directory.
 
 Commands:
 
@@ -32,4 +33,4 @@ The plugin launches Python with `shell: false` and streams structured progress i
 
 The cc-switch database view requires an Obsidian/Electron runtime with `node:sqlite`. On older desktop runtimes, the plugin still loads and can use the environment configuration source.
 
-The cc-switch provider workflow and layout are adapted from [CLI-Manager](https://github.com/dark-hxx/CLI-Manager), Copyright (c) 2026 Chenyme, under AGPL-3.0-or-later. See `NOTICE` and `LICENSE`.
+The cc-switch provider workflow and layout are adapted from [CLI-Manager](https://github.com/dark-hxx/CLI-Manager), Copyright (c) 2026 Chenyme, under AGPL-3.0-or-later. See `NOTICE`, `COPYRIGHT.md`, and `LICENSE`. The corresponding source for a released bundle is published in the `obsidian-plugin/` directory of [RexVane/video-memo](https://github.com/RexVane/video-memo).
