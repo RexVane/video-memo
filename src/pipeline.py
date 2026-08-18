@@ -13,6 +13,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+
+from project_paths import project_root
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
@@ -26,6 +28,7 @@ from download import (
     import_local_media,
     load_download_result,
     probe,
+    _yt_dlp_command,
 )
 from frames import extract_frames
 from llm_config import LLMConfig, default_model, resolve_llm_config
@@ -33,6 +36,7 @@ from obsidian_export import export_to_vault
 from summarize import summarize
 from subtitles import transcript_from_vtt
 from transcribe import Transcript, save_transcript, transcribe
+from version import VERSION
 
 ProgressCb = Callable[[str, float], None]
 JSON_EVENT_PREFIX = "@@VIDEOMEMO@@"
@@ -120,10 +124,13 @@ def _preflight(
         raise ValueError("关键帧数量必须大于 0")
     if not llm_model.strip():
         raise ValueError("AI 模型名不能为空")
-    commands = ("yt-dlp", "ffmpeg") if require_downloader else ("ffmpeg",)
-    for command in commands:
-        if shutil.which(command) is None:
-            raise RuntimeError(f"未找到 {command}，请先安装并加入 PATH")
+    if require_downloader:
+        try:
+            _yt_dlp_command()
+        except FileNotFoundError as exc:
+            raise RuntimeError("未找到 yt-dlp，请先安装并加入 PATH") from exc
+    if shutil.which("ffmpeg") is None:
+        raise RuntimeError("未找到 ffmpeg，请先安装并加入 PATH")
     return resolve_llm_config(
         llm_model,
         api_key=api_key,
@@ -795,6 +802,11 @@ def main(argv: list[str] | None = None) -> int:
         help="视频链接（YouTube / B站 等 yt-dlp 支持的站点），或本地视频/录音文件路径",
     )
     p.add_argument(
+        "--version",
+        action="version",
+        version=VERSION,
+    )
+    p.add_argument(
         "--regenerate",
         type=Path,
         metavar="RUN_DIR",
@@ -804,7 +816,7 @@ def main(argv: list[str] | None = None) -> int:
         "-o",
         "--output",
         type=Path,
-        default=Path(__file__).resolve().parent.parent / "output",
+        default=project_root() / "output",
         help="输出根目录",
     )
     p.add_argument(

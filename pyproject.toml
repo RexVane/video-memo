@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel>=0.45"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "videomemo-engine"
+dynamic = ["version"]
+description = "Local video and audio learning-note engine for VideoMemo"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "VideoMemo / RexVane" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Operating System :: Microsoft :: Windows",
+  "Topic :: Multimedia :: Video",
+]
+dependencies = [
+  "openai>=1.40.0",
+  "yt-dlp>=2024.8.0",
+  "faster-whisper>=1.0.0",
+  "python-dotenv>=1.0.0",
+  "customtkinter>=5.2.0",
+  "webvtt-py>=0.5.1",
+  "tomli>=2.0.1; python_version < '3.11'",
+]
+
+[project.urls]
+Homepage = "https://github.com/RexVane/video-memo"
+Repository = "https://github.com/RexVane/video-memo.git"
+Issues = "https://github.com/RexVane/video-memo/issues"
+
+[project.scripts]
+videomemo = "pipeline:main"
+
+[project.optional-dependencies]
+dev = [
+  "build>=1.2.2",
+  "ruff>=0.8.0",
+]
+
+[tool.setuptools.dynamic]
+version = { attr = "version.VERSION" }
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+py-modules = [
+  "app_gui",
+  "cancellation",
+  "download",
+  "fast_download",
+  "frames",
+  "llm_config",
+  "obsidian_export",
+  "pipeline",
+  "project_paths",
+  "subtitles",
+  "summarize",
+  "transcribe",
+  "version",
+]

@@ -15,6 +15,11 @@ import download  # noqa: E402
 from cancellation import CancellationRequested  # noqa: E402
 
 
+def _is_yt_dlp_command(command: list[str]) -> bool:
+    prefix = download._yt_dlp_command()
+    return command[: len(prefix)] == prefix
+
+
 def _format(
     name: str,
     *,
@@ -355,7 +360,7 @@ class DownloadTests(unittest.TestCase):
             )
 
             def fake_run(command, **kwargs):
-                if command[0] == "yt-dlp":
+                if _is_yt_dlp_command(command):
                     (work / "source.mp4").write_bytes(b"video")
                     (work / "source.en-orig.vtt").write_text(
                         "WEBVTT", encoding="utf-8"
@@ -390,7 +395,7 @@ class DownloadTests(unittest.TestCase):
             )
 
             def fake_run(command, **kwargs):
-                if command[0] == "yt-dlp":
+                if _is_yt_dlp_command(command):
                     (work / "source.mp4").write_bytes(b"video")
                 else:
                     Path(command[-1]).write_bytes(b"RIFF" + (b"0" * 64))
@@ -417,7 +422,7 @@ class DownloadTests(unittest.TestCase):
             )
 
             def fake_run(command, **kwargs):
-                if command[0] == "yt-dlp":
+                if _is_yt_dlp_command(command):
                     (work / "source.avi").write_bytes(b"video")
                 else:
                     Path(command[-1]).write_bytes(b"RIFF" + (b"0" * 64))
@@ -481,7 +486,7 @@ class DownloadTests(unittest.TestCase):
                 "test-agent",
             )
             self.assertFalse(
-                any(call.args[0][0] == "yt-dlp" for call in run_mock.call_args_list)
+                any(_is_yt_dlp_command(call.args[0]) for call in run_mock.call_args_list)
             )
             self.assertFalse(
                 any(path.name.startswith(".fast-download-") for path in work.iterdir())
@@ -569,7 +574,7 @@ class DownloadTests(unittest.TestCase):
                 return SimpleNamespace(destination=Path(destination))
 
             def fake_run(command, **kwargs):
-                if command[0] == "yt-dlp":
+                if _is_yt_dlp_command(command):
                     (work / "source.en.vtt").write_text("WEBVTT", encoding="utf-8")
                 else:
                     Path(command[-1]).write_bytes(b"RIFF" + (b"0" * 64))
@@ -586,7 +591,7 @@ class DownloadTests(unittest.TestCase):
             yt_commands = [
                 call.args[0]
                 for call in run_mock.call_args_list
-                if call.args[0][0] == "yt-dlp"
+                if _is_yt_dlp_command(call.args[0])
             ]
             self.assertEqual(len(yt_commands), 1)
             self.assertIn("--skip-download", yt_commands[0])
@@ -620,7 +625,7 @@ class DownloadTests(unittest.TestCase):
                 raise RuntimeError("range failed")
 
             def fake_run(command, **kwargs):
-                if command[0] == "yt-dlp":
+                if _is_yt_dlp_command(command):
                     (work / "source.webm").write_bytes(b"fallback")
                     return SimpleNamespace(
                         returncode=0,
@@ -675,7 +680,7 @@ class DownloadTests(unittest.TestCase):
 
             def fake_run(command, **kwargs):
                 nonlocal yt_calls
-                if command[0] == "yt-dlp":
+                if _is_yt_dlp_command(command):
                     yt_calls += 1
                     if "--skip-download" in command:
                         (work / "source.en.vtt").write_text(
@@ -757,7 +762,7 @@ class DownloadTests(unittest.TestCase):
                     fast_mock.reset_mock()
 
                     def fake_run(command, **kwargs):
-                        if command[0] == "yt-dlp":
+                        if _is_yt_dlp_command(command):
                             (work / "source.mp4").write_bytes(b"cookie media")
                         else:
                             Path(command[-1]).write_bytes(

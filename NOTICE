@@ -1,0 +1,16 @@
+VideoMemo
+Copyright 2026 VideoMemo / RexVane
+
+The Apache-2.0 license in the repository root applies to the VideoMemo Python
+engine, tests, Windows scripts, and documentation outside the obsidian-plugin/
+directory.
+
+The obsidian-plugin/ directory is a separate Obsidian plugin distribution. It
+contains code adapted from CLI-Manager and is distributed under
+AGPL-3.0-or-later with its own LICENSE, COPYRIGHT.md, and NOTICE files. The
+root Apache-2.0 license does not relicense or replace that plugin license.
+
+Third-party components and external runtime dependencies are documented in
+THIRD-PARTY-NOTICES.md. No API keys, browser cookies, media files, Whisper
+weights, ffmpeg binaries, or standalone yt-dlp executables are included in
+this repository.

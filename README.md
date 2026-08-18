@@ -1,41 +1,77 @@
-# VideoMemo — 视频 / 录音总结
+# VideoMemo
 
-给它一个视频链接，或一个本地视频 / 录音文件，程序会：
+VideoMemo 将视频链接、本地视频或录音转换成可检索的学习笔记，并可直接导出到 Obsidian。
+它由一个本地 Python 引擎和一个桌面 Obsidian 插件组成。
 
-1. **下载** 视频（由 `yt-dlp` 解析 YouTube、B 站等站点；已解析的普通 HTTP 直链会自动尝试多连接 Range 传输）；本地文件直接使用，跳过下载
-2. **听** 优先读取平台字幕；没有可用字幕时提取音轨并用 **Whisper** 本地转写
-3. **看** 均匀抽取关键帧（可选；纯音频输入自动跳过）
-4. **总结** 调用支持图片输入的 **OpenAI 兼容 API** 生成中文结构化摘要
+## 能做什么
 
-## 环境要求
+```text
+视频链接 / 本地媒体
+    ↓
+字幕优先；没有字幕时使用本地 faster-whisper 转写
+    ↓
+视频可抽取关键帧（可用 --no-vision 跳过）
+    ↓
+OpenAI-compatible 多模态模型生成结构化学习笔记
+    ↓
+Markdown 报告 + 可选 Obsidian 笔记和关键帧附件
+```
 
-- Python 3.10+
-- [ffmpeg](https://ffmpeg.org/) 已在 PATH 中
-- OpenAI 兼容 API 的 Key、Base URL 和多模态模型
+- 远程 URL：使用 `yt-dlp` 解析站点、格式、字幕和 Cookie；普通 HTTP 直链会尝试经过严格校验的 Range 多连接下载，失败自动回退到 `yt-dlp`。
+- 本地媒体：直接读取原文件，不复制、不删除原文件；视频默认仍可抽帧，音频自动跳过画面分析。
+- 字幕：优先使用平台手工字幕，其次自动字幕，最后回退到本地 Whisper。
+- 隐私：转写在本地完成；摘要请求会把转写和选定关键帧发送到你配置的模型服务。
 
-推荐使用独立虚拟环境，避免与系统 Python 中的其它项目发生依赖冲突：
+## 支持环境
+
+| 组件 | 要求 |
+| --- | --- |
+| Python | 3.10–3.13；Python 3.10 自动使用 `tomli` 兼容 TOML |
+| ffmpeg | 必须安装并加入 PATH；项目不捆绑二进制 |
+| ffprobe | 推荐安装；缺失时仍可运行，但无法读取部分媒体时长 |
+| Windows GUI | Windows 10/11，推荐项目 `.venv` |
+| Obsidian 插件 | 桌面版 Obsidian，插件 `video-memo`；移动端不支持 |
+| Node.js | 仅从源码构建插件时需要 Node.js 18+ |
+| 模型 | 启用画面分析时需要支持图片输入的 OpenAI-compatible 模型；`--no-vision` 只需文本模型 |
+
+## 安装 Python 引擎
+
+从仓库根目录执行：
 
 ```powershell
 python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-API 配置有三种方式，优先级从高到低：
+也可以安装为命令行工具（仍需在可访问配置和媒体的工作目录运行）：
 
-1. 在桌面界面填写 Base URL、API Key 和模型。
-2. 使用 `.env` 或系统环境变量：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`。通用 `LLM_API_KEY` 必须与 `LLM_BASE_URL` 同时配置。
-3. 自动复用 `~/.grok/config.toml` 中对应模型的 Key 和 Base URL；没有本机 Grok 配置时，`XAI_API_KEY` 默认连接 `https://api.x.ai/v1`，单独的 `OPENAI_API_KEY` 则连接 OpenAI 官方 API。
+```powershell
+.\.venv\Scripts\python.exe -m pip install -e .
+videomemo --version
+```
 
-自定义 Base URL 会收到所选 API Key，只应使用可信的 HTTPS 服务。系统环境变量不会被写入项目文件。
+首次使用 Whisper 时会下载模型到 `models/faster-whisper/`；该目录已被 Git 忽略。可用 `WHISPER_MODEL_DIR` 指定其他位置。通过已安装的 `videomemo` 命令运行时，默认数据根目录是当前工作目录；也可以用 `VIDEOMEMO_PROJECT_ROOT` 指定 `.env`、模型和输出所在目录。
 
-两个可选环境变量：`LLM_API_FORMAT` 选择 API 线格式，默认 Chat Completions，设为 `responses` 时改用 OpenAI Responses API；`LLM_NOTES_MODEL` 指定长转写分章笔记使用的模型，默认与主模型相同。
+## API 配置
 
-首次运行 Whisper 会自动把模型权重下载到项目内的 `models/faster-whisper/`（`base` 约 140MB）。该目录不提交到 Git；需要改用其他位置时可设置 `WHISPER_MODEL_DIR`，相对路径按项目根目录解析。
+优先级从高到低：
 
-## 桌面程序（推荐）
+1. 桌面 GUI、Obsidian 插件或命令行显式传入；
+2. `.env` / 环境变量：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`；
+3. 本机 `~/.grok/config.toml`；
+4. `XAI_API_KEY` 默认连接 xAI，`OPENAI_API_KEY` 默认连接 OpenAI。
 
-双击或运行：
+兼容的 Base URL 变量包括 `OPENAI_BASE_URL`、`OPENAI_API_BASE`、`XAI_BASE_URL` 和
+`GROK_MODELS_BASE_URL`；兼容的 xAI key 包括 `GROK_API_KEY` 和
+`GROK_CODE_XAI_API_KEY`。程序实现允许 `http` 和 `https`，生产环境建议使用可信的 HTTPS；
+本地服务可使用 `http://localhost`。API key 不应写入日志、插件数据或 Git。
+
+`LLM_API_FORMAT` 默认使用 Chat Completions，也接受 `responses`、`openai_responses` 或
+`response`；`LLM_NOTES_MODEL` 可为长转写章节指定单独模型。
+
+## GUI
 
 ```powershell
 .\start_gui.cmd
@@ -43,126 +79,136 @@ API 配置有三种方式，优先级从高到低：
 .\.venv\Scripts\python.exe src/app_gui.py
 ```
 
-界面可：粘贴链接或点「选择文件…」挑选本地视频 / 录音、选 Whisper 精度、填写 OpenAI 兼容 API、输入任意模型名、选浏览器 Cookie（YouTube 反爬时用）、查看进度与总结、复制结果、打开输出文件夹。
-启动脚本会优先使用 `.venv`，不存在时才使用 PATH 中的 Python。
+GUI 支持链接/本地文件、Whisper 精度、语言、Cookie、关键帧数量、API 配置、进度、取消、
+复制总结和打开输出目录。
 
-## 命令行用法
+## CLI
 
 ```powershell
-# Windows
+# 远程视频
 .\summarize.cmd "https://www.youtube.com/watch?v=xxxx"
+python src/pipeline.py "https://www.bilibili.com/video/BVxxxx"
 
-# 本地视频或录音文件（无需 yt-dlp，纯音频自动跳过画面分析）
+# 本地视频或录音
 .\summarize.cmd "D:\录像\课程.mp4"
 .\summarize.cmd "D:\录音\会议.m4a"
 
-# 或
-python src/pipeline.py "https://www.bilibili.com/video/BVxxxx"
-
-# YouTube 提示登录时，从本机浏览器读 Cookie
+# 需要登录：优先匿名，匿名失败后读取浏览器 Cookie
 python src/pipeline.py "URL" --cookies-from-browser edge
+python src/pipeline.py "URL" --cookies "D:\secure\cookies.txt"
 
-# API 失败或需要更换模型时，复用已有转写和关键帧重新生成
+# 重新生成：复用已有转写和关键帧，不重新下载
 python src/pipeline.py --regenerate "output\20260716_120000_课程"
 
-# 同时导出为 Obsidian 笔记和附件
+# 导出 Obsidian
 python src/pipeline.py "URL" --obsidian-vault "D:\Notes\My Vault"
+
+# 检查版本
+python src/pipeline.py --version
 ```
 
-支持的本地格式：视频 `mp4 / mkv / webm / mov / avi / flv / m4v / ts / mpg / mpeg / wmv`，音频 `mp3 / wav / m4a / flac / aac / ogg / opus / wma / amr / aiff`。本地模式不会复制原始媒体文件，只在输出目录生成音轨、转写与总结。
-
-相同来源再次运行时会复用满足当前设置的最近任务，并重新生成报告。本地文件大小或修改时间变化、Whisper 模型或语言变化、以及现有缓存不能满足关键帧要求时，会自动重新处理，不会静默复用不兼容的转写或画面。
-
-### 常用参数
+参数：
 
 | 参数 | 说明 |
-|------|------|
-| `-m base` | Whisper 模型：`tiny` / `base` / `small` / `medium` / `large-v3` |
-| `-l zh` | 指定语言（默认自动检测） |
-| `--max-frames 8` | 给视觉模型的关键帧数量 |
-| `--no-vision` | 只听不看（更快、更省 token） |
-| `--cleanup-media` | 成功后删除下载媒体和音轨；保留总结、转写、字幕与关键帧 |
-| `--llm-model grok-4.5` | OpenAI 兼容模型名（默认读取 `LLM_MODEL`） |
-| `--api-base-url URL` | 临时覆盖 OpenAI 兼容 API 根地址 |
-| `--regenerate DIR` | 从已有运行目录重新生成报告，不重复下载和转写 |
-| `--obsidian-vault DIR` | 将报告与关键帧导出到 Obsidian Vault |
-| `--obsidian-folder DIR` | Vault 内目标文件夹，默认 `Video Memos` |
-| `-o output` | 输出根目录 |
+| --- | --- |
+| `-o, --output DIR` | 输出根目录 |
+| `-m, --whisper-model` | `tiny` / `base` / `small` / `medium` / `large-v3` |
+| `-l, --language` | 语言代码，如 `zh`、`en`；默认自动检测 |
+| `--max-frames N` | 最多发送给视觉模型的关键帧数量 |
+| `--no-vision` | 跳过画面分析，不要求多模态模型 |
+| `--cleanup-media` | 成功后删除本次下载媒体和 `audio.wav` |
+| `--llm-model MODEL` | 模型名 |
+| `--api-base-url URL` | 临时覆盖 API Base URL |
+| `--cookies-from-browser BROWSER` | 从浏览器读取 Cookie |
+| `--cookies FILE` | 使用导出的 `cookies.txt` |
+| `--obsidian-vault DIR` | 导出报告和关键帧到 Vault |
+| `--obsidian-folder DIR` | Vault 目标文件夹，默认 `Video Memos` |
+| `--regenerate DIR` | 从已有运行目录重新生成报告 |
+| `--version` | 显示引擎版本 |
+| `--json-progress` | 插件内部使用的结构化进度输出 |
 
-### 示例
+支持的视频扩展名：`.mp4`、`.mkv`、`.webm`、`.mov`、`.avi`、`.flv`、`.m4v`、`.ts`、
+`.mpg`、`.mpeg`、`.wmv`、`.3gp`、`.3g2`、`.f4v`、`.ogv`。
 
-```powershell
-# 中文口播，更高精度转写
-python src/pipeline.py "URL" -m small -l zh
+支持的音频扩展名：`.mp3`、`.wav`、`.m4a`、`.flac`、`.aac`、`.ogg`、`.opus`、`.wma`、
+`.amr`、`.aiff`、`.mka`、`.oga`、`.weba`、`.mpga`。
 
-# 只要文字总结，不传截图
-python src/pipeline.py "URL" --no-vision
+## 输出和缓存
 
-# 自定义 OpenAI 兼容服务；Key 从 LLM_API_KEY 读取
-$env:LLM_API_KEY = "你的 API Key"
-python src/pipeline.py "URL" --api-base-url "https://api.example.com/v1" --llm-model "vision-model"
-```
+每个任务位于 `output/<时间戳>_<标题>/`，通常包含：
 
-## 输出
+- `summary.md`：扫描优先的结构化学习笔记；
+- `transcript.txt`：带时间戳的转写；
+- `audio.wav`：用于 ASR 的中间音轨；
+- `frames/`：启用视觉且输入含视频时的关键帧；
+- `source.*`：远程下载的媒体；本地输入不会复制该文件；
+- `info.json`：元数据、缓存和完成状态。
 
-每次运行会在 `output/时间戳_标题/` 下生成：
+相同来源会复用兼容的最近任务。`--cleanup-media` 只删除本次运行目录中的下载媒体和音轨，
+保留报告、转写、字幕和关键帧；本地原始文件永远不会删除。
 
-- `summary.md` — “先速学、后深挖”的精华知识笔记（复杂关系可含 Mermaid 图）
-- `transcript.txt` — 带时间戳的转写
-- `audio.wav` — 提取的音轨
-- `frames/` — 关键帧（若启用视觉）
-- `source.*` — 下载的原始媒体
-- `info.json` — 元数据
+## Obsidian 插件
 
-使用 `--cleanup-media` 时，只清理本次输出目录中的下载媒体与 `audio.wav`；本地输入原文件永远不会被删除。清理后的运行目录仍可通过 `--regenerate` 重新生成报告。
+`obsidian-plugin/` 是桌面端 `video-memo` 插件。它提供输入弹窗、供应商/模型设置、任务进度、
+取消、后台运行和完成后自动打开笔记。插件通过 `shell: false` 启动项目 Python 引擎，
+所以仍需准备 Python 项目依赖、ffmpeg 和 yt-dlp。
 
-指定 `--obsidian-vault` 后，程序会生成带 YAML frontmatter 的稳定命名笔记，并把关键帧复制到 Vault 内的附件目录。再次处理同一来源会更新同一篇笔记。
-
-知识笔记先用一句话结论、核心知识表和最短理解路径呈现视频精华，再展开知识脉络、核心原理、实际操作、对比与易错点。流程、架构、依赖或因果关系较复杂时会生成 Obsidian 可直接渲染的 Mermaid 图；逐章来源笔记默认折叠在文末，便于按时间戳追溯。报告不会生成练习题或自测题。
-
-## Obsidian 桌面插件
-
-`obsidian-plugin/` 提供桌面版薄壳插件。它将链接与本地文件分为两个输入模式，提供系统文件选择器，并通过子进程调用本项目的 Python 引擎。任务弹窗顶部会显示本次将使用的供应商与模型。插件设置首页将供应商、项目目录和 Python 路径等选项放在同一栏目；点击供应商后进入 cc-switch 数据库与供应商列表，再点击具体供应商查看详情（原始配置默认折叠）。模型下拉框会使用该供应商的 Base URL 和 Key 实时读取 OpenAI 兼容 `/models` 接口，失败时回退到本地配置模型。密钥只在请求或任务启动时读入内存，不写入插件配置。运行时会弹出进度面板（进度条、实时日志、取消、后台运行），点击状态栏可随时重新打开；失败时面板展示可复制的错误详情，完成后自动打开导出的笔记。
-
-插件的 cc-switch 供应商交互、解析逻辑与布局改编自 [CLI-Manager](https://github.com/dark-hxx/CLI-Manager)，Copyright (c) 2026 Chenyme，依据 AGPL-3.0-or-later 使用。详见 `obsidian-plugin/NOTICE` 与 `obsidian-plugin/LICENSE`。
+手动构建/安装：
 
 ```powershell
 cd obsidian-plugin
-npm.cmd install
+npm.cmd ci
+npm.cmd run check
+npm.cmd run build
+.\install.ps1 -VaultPath "D:\Notes\My Vault"
+```
+
+安装目录为：
+
+```text
+<your-vault>/.obsidian/plugins/video-memo/
+```
+
+启用插件后，在设置中填写包含 `src/pipeline.py` 的项目目录。Python 路径留空时优先使用该
+项目 `.venv`。安装脚本会复制 `main.js`、`manifest.json`、`styles.css`、`LICENSE`、`NOTICE`
+和 `COPYRIGHT.md`；对应 TypeScript 源码与构建配置保留在本仓库。cc-switch 数据库只读打开；
+旧 Obsidian/Electron 不支持 `node:sqlite` 时可切换到环境变量配置。
+
+插件与 Python 引擎分层许可：Python 根项目 Apache-2.0；插件 AGPL-3.0-or-later。详见
+`LICENSE`、`NOTICE`、`obsidian-plugin/LICENSE`、`obsidian-plugin/COPYRIGHT.md` 和
+`THIRD-PARTY-NOTICES.md`。
+
+## 开发与发布
+
+```powershell
+python -m compileall -q src tests
+python -m unittest discover -s tests -v
+cd obsidian-plugin
+npm.cmd ci
+npm.cmd run check
 npm.cmd run build
 ```
 
-构建后运行 `obsidian-plugin/install.ps1 -VaultPath "D:\Notes\My Vault"` 安装必要文件，启用插件后在设置里填写本项目目录。插件仅支持桌面版 Obsidian；Python、ffmpeg、yt-dlp 和模型依赖仍由本项目环境提供。cc-switch 数据库集成需要 Obsidian 内置支持 `node:sqlite`；旧运行时仍可加载插件并切换到“环境配置”。
+GitHub Actions 会验证 Python 3.10–3.13、插件类型检查和构建产物同步。插件 tag 发布流程会
+生成 `main.js`、`manifest.json`、`styles.css`、许可证文件和 SHA-256 校验文件；不会包含
+`.env`、模型、媒体、Vault 或依赖缓存。
 
-## 能力与限制
+## 安全与贡献
 
-| 能做 | 注意 |
-|------|------|
-| 听对白、旁白并转写 | 纯 BGM / 强噪音准确度下降 |
-| 看截图里的场景、字幕、图表 | 不是逐帧「看完整部电影」 |
-| 多平台链接（yt-dlp 支持的） | 需可访问；部分站点要 cookie |
-| 本地 ASR，隐私较好 | 长视频耗时与磁盘占用增加 |
+不要提交 API key、Cookie、真实媒体、转写、Whisper 权重、输出目录或 Vault 内容。漏洞请按
+`SECURITY.md` 私下报告；贡献流程见 `CONTRIBUTING.md`，行为准则见 `CODE_OF_CONDUCT.md`。
 
-需要登录才能看的视频，可自行给 `yt-dlp` 配置 cookies（见 [yt-dlp 文档](https://github.com/yt-dlp/yt-dlp)）。
-即使选择了浏览器 Cookie，程序也会先匿名访问；公开视频不会读取浏览器数据库。只有匿名访问失败时才读取 Cookie，从而避开 Chrome 数据库锁定问题。
-长转写会拆成多个连续章节，并行生成详细学习笔记后再综合，因此会产生多次模型请求。关键帧最长边会压缩到 1280 像素，以控制上传体积。
-在线视频默认选择不超过 1080p 的画质。`yt-dlp` 仍负责站点解析、格式选择、字幕、Cookie 以及 HLS/DASH 等分片媒体；当它返回安全的普通 HTTP/HTTPS 直链时，程序会先尝试最多 4 路 Range 传输，严格校验响应并在完成后原子提交。服务器不支持 Range、需要认证、响应不可信或高速传输失败时，会自动回退到完整的 `yt-dlp` 下载，不会丢失字幕或元数据。高速传输只在无 Cookie 参数时启用，临时分段文件会在失败或取消时清理。瞬时媒体网络错误（408、429、5xx 等）会有限重试；LLM API 错误也会按总结模块策略重试，二者相互独立。
+## 许可证
 
-## 开发验证
+- 根目录 Python 引擎、测试、脚本和文档：Apache-2.0；
+- `obsidian-plugin/`：AGPL-3.0-or-later；
+- 依赖和外部运行时：见 `THIRD-PARTY-NOTICES.md`。
 
-```powershell
-.\.venv\Scripts\python.exe -m compileall -q src
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
-```
+## 相关文档
 
-## 架构
-
-```
-URL / 本地媒体
- ├─ yt-dlp 解析/字幕/分片下载
- │       └─ 普通 HTTP 直链 → Range 多连接传输（失败回退 yt-dlp）
- └─ 无字幕时：ffmpeg → audio.wav → faster-whisper → transcript
-                    ├─ ffmpeg → frames/*.jpg
-                    └─ OpenAI-compatible LLM → summary.md
-                                      └─ Obsidian 笔记 + 附件
-```
+- [架构说明](docs/architecture.md)
+- [变更记录](CHANGELOG.md)
+- [贡献指南](CONTRIBUTING.md)
+- [安全政策](SECURITY.md)
+- [第三方声明](THIRD-PARTY-NOTICES.md)
+- [历史设计计划](docs/archive/REDESIGN_PLAN.md)

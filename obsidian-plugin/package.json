@@ -2,8 +2,21 @@
   "name": "obsidian-video-memo",
   "version": "0.1.0",
   "private": true,
-  "description": "Obsidian desktop shell for the VideoMemo Python engine",
+  "description": "Obsidian desktop plugin for the VideoMemo Python engine",
   "main": "main.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/RexVane/video-memo.git",
+    "directory": "obsidian-plugin"
+  },
+  "homepage": "https://github.com/RexVane/video-memo/tree/main/obsidian-plugin",
+  "bugs": {
+    "url": "https://github.com/RexVane/video-memo/issues"
+  },
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "node esbuild.config.mjs production",

@@ -1,0 +1,63 @@
+name: Release Obsidian plugin
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: obsidian-plugin/package-lock.json
+      - name: Install dependencies
+        working-directory: obsidian-plugin
+        run: npm ci
+      - name: Check plugin
+        working-directory: obsidian-plugin
+        run: npm run check
+      - name: Build plugin
+        working-directory: obsidian-plugin
+        run: npm run build
+      - name: Validate versions
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const manifest = JSON.parse(fs.readFileSync('obsidian-plugin/manifest.json'));
+          const pkg = JSON.parse(fs.readFileSync('obsidian-plugin/package.json'));
+          const versions = JSON.parse(fs.readFileSync('obsidian-plugin/versions.json'));
+          const tag = process.env.GITHUB_REF_NAME.slice(1);
+          if (manifest.version !== pkg.version || versions[manifest.version] !== manifest.minAppVersion) {
+            throw new Error('plugin version metadata is inconsistent');
+          }
+          if (manifest.version !== tag) {
+            throw new Error(`tag ${tag} does not match plugin ${manifest.version}`);
+          }
+          NODE
+      - name: Check generated bundle
+        run: git diff --exit-code -- obsidian-plugin/main.js
+      - name: Package plugin
+        shell: bash
+        run: |
+          mkdir -p dist/video-memo
+          cp obsidian-plugin/main.js obsidian-plugin/manifest.json obsidian-plugin/styles.css \
+             obsidian-plugin/LICENSE obsidian-plugin/NOTICE obsidian-plugin/COPYRIGHT.md dist/video-memo/
+          (cd dist && zip -r "video-memo-${GITHUB_REF_NAME#v}.zip" video-memo)
+          sha256sum "dist/video-memo-${GITHUB_REF_NAME#v}.zip" > "dist/video-memo-${GITHUB_REF_NAME#v}.zip.sha256"
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/video-memo-*.zip
+            dist/video-memo-*.zip.sha256

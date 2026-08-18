@@ -1,0 +1,4 @@
+-r requirements.txt
+build>=1.2.2
+wheel>=0.45.0
+ruff>=0.8.0
