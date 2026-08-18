@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+import httpx
 from openai import APIConnectionError, APIStatusError, OpenAI
 
 from cancellation import CancellationSignal, check_cancelled
@@ -128,6 +129,53 @@ def _uses_responses_api() -> bool:
     return value in {"responses", "openai_responses", "response"}
 
 
+def _uses_anthropic_messages() -> bool:
+    value = os.environ.get("LLM_API_FORMAT", "").strip().lower().replace("-", "_")
+    return value in {"anthropic_messages", "anthropic", "messages"}
+
+
+def _anthropic_messages_url(base_url: str) -> str:
+    """Append /messages to the API root, matching the plugin's endpoint logic."""
+    url = base_url.rstrip("/")
+    if url.endswith("/v1"):
+        return f"{url}/messages"
+    if "/v1/" in url:
+        return f"{url}/messages"
+    return f"{url}/v1/messages"
+
+
+def _anthropic_content_blocks(content) -> list[dict]:
+    """Convert OpenAI-style content to Anthropic content blocks."""
+    if isinstance(content, str):
+        return [{"type": "text", "text": content}]
+    blocks: list[dict] = []
+    for item in content or []:
+        item_type = item.get("type")
+        if item_type == "text":
+            blocks.append({"type": "text", "text": item.get("text", "")})
+        elif item_type == "image_url":
+            image = item.get("image_url") or {}
+            data_uri = image.get("url", "")
+            # Parse data:image/jpeg;base64,<data>
+            if not data_uri.startswith("data:"):
+                raise ValueError("Anthropic 仅支持 base64 data URI 图片")
+            header, _, b64data = data_uri.partition(",")
+            media_type = "image/jpeg"
+            if ";base64," in header:
+                media_type = header[5:].split(";")[0] or media_type
+            blocks.append(
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": media_type,
+                        "data": b64data,
+                    },
+                }
+            )
+    return blocks
+
+
 def _responses_message_content(content) -> list[dict]:
     if isinstance(content, str):
         return [{"type": "input_text", "text": content}]
@@ -187,13 +235,142 @@ def _wait_before_retry(
         time.sleep(min(0.2, max(0.0, deadline - time.monotonic())))
 
 
+class _AnthropicHttpError(Exception):
+    """Wraps an httpx HTTPStatusError with a status code and detail."""
+
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"HTTP {status_code}: {detail}")
+
+
+def _anthropic_completion(
+    http_client: httpx.Client,
+    config,
+    *,
+    model: str,
+    messages: list[dict],
+    temperature: float = 0.2,
+    max_tokens: int = 4_000,
+) -> str:
+    """Send a single native Anthropic Messages request via httpx."""
+    system_parts: list[str] = []
+    anthropic_messages: list[dict] = []
+    for message in messages:
+        role = message.get("role", "user")
+        content = message.get("content", "")
+        if role == "system":
+            if isinstance(content, str) and content.strip():
+                system_parts.append(content)
+            continue
+        anthropic_messages.append(
+            {"role": role, "content": _anthropic_content_blocks(content)}
+        )
+
+    request_body: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": anthropic_messages,
+        "temperature": temperature,
+    }
+    if system_parts:
+        request_body["system"] = "\n\n".join(system_parts)
+
+    endpoint = _anthropic_messages_url(config.base_url)
+    response = http_client.post(
+        endpoint,
+        json=request_body,
+        headers={
+            "x-api-key": config.api_key,
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        },
+    )
+    if response.status_code < 200 or response.status_code >= 300:
+        detail = ""
+        try:
+            payload = response.json()
+            error_obj = payload.get("error") if isinstance(payload, dict) else None
+            if isinstance(error_obj, dict):
+                detail = str(error_obj.get("message", ""))[:240]
+            elif isinstance(payload, dict) and payload.get("message"):
+                detail = str(payload["message"])[:240]
+        except Exception:
+            detail = response.text[:240]
+        raise _AnthropicHttpError(response.status_code, detail)
+
+    payload = response.json()
+    text_parts = [
+        block.get("text", "")
+        for block in payload.get("content", [])
+        if block.get("type") == "text"
+    ]
+    return "\n".join(part for part in text_parts if part)
+
+
+def _anthropic_chat_completion(
+    http_client: httpx.Client | None,
+    config,
+    *,
+    cancel_event: CancellationSignal | None = None,
+    **kwargs,
+) -> str:
+    """Call Anthropic Messages API with the same retry semantics as Chat/Responses."""
+    if http_client is None or config is None:
+        raise RuntimeError("Anthropic Messages 模式需要 httpx 客户端和 LLM 配置")
+    for attempt in range(1, MAX_API_ATTEMPTS + 1):
+        check_cancelled(cancel_event)
+        try:
+            return _anthropic_completion(
+                http_client,
+                config,
+                model=kwargs["model"],
+                messages=kwargs.get("messages", []),
+                temperature=kwargs.get("temperature", 0.2),
+                max_tokens=kwargs.get("max_tokens", 4_000),
+            )
+        except httpx.RequestError:
+            if attempt == MAX_API_ATTEMPTS:
+                raise RuntimeError(
+                    f"无法连接 AI 服务，已自动重试 {MAX_API_ATTEMPTS} 次仍失败。"
+                    "请检查网络或 Base URL 后重试。"
+                )
+        except _AnthropicHttpError as error:
+            retryable = error.status_code in RETRYABLE_STATUS_CODES
+            if not retryable or attempt == MAX_API_ATTEMPTS:
+                message = API_ERROR_MESSAGES.get(error.status_code)
+                if message:
+                    raise RuntimeError(message) from error
+                if retryable:
+                    raise RuntimeError(
+                        f"AI 服务暂时不可用（HTTP {error.status_code}），"
+                        f"已自动重试 {MAX_API_ATTEMPTS} 次仍失败，请稍后重试。"
+                    ) from error
+                detail = error.detail or ""
+                raise RuntimeError(
+                    f"Anthropic 请求失败（HTTP {error.status_code}）{('：' + detail) if detail else ''}"
+                ) from error
+        _wait_before_retry(attempt, cancel_event)
+    raise RuntimeError("Anthropic 请求已耗尽重试次数")
+
+
 def _chat_completion(
     client: OpenAI,
     *,
     cancel_event: CancellationSignal | None = None,
+    http_client: httpx.Client | None = None,
+    config=None,
     **kwargs,
 ):
     """Call the API, retrying transient failures (rate limits, 5xx, network)."""
+    if _uses_anthropic_messages():
+        return _anthropic_chat_completion(
+            http_client,
+            config,
+            cancel_event=cancel_event,
+            **kwargs,
+        )
     for attempt in range(1, MAX_API_ATTEMPTS + 1):
         check_cancelled(cancel_event)
         try:
@@ -251,6 +428,8 @@ def _generate_chapter_notes(
     model: str,
     on_progress: SummaryProgressCb | None = None,
     cancel_event: CancellationSignal | None = None,
+    http_client: httpx.Client | None = None,
+    config=None,
 ) -> list[str]:
     check_cancelled(cancel_event)
     if not transcript.strip():
@@ -277,6 +456,8 @@ def _generate_chapter_notes(
         response = _chat_completion(
             client,
             cancel_event=cancel_event,
+            http_client=http_client,
+            config=config,
             model=notes_model,
             messages=[
                 {"role": "system", "content": system},
@@ -346,168 +527,178 @@ def summarize(
     base_url: str | None = None,
     on_progress: SummaryProgressCb | None = None,
     cancel_event: CancellationSignal | None = None,
-) -> str:
+) -> SummarizeResult:
     """
     Build scan-first knowledge notes from transcript and optional key frames.
     """
+    config = resolve_llm_config(model, api_key=api_key, base_url=base_url)
     client = _client(model, api_key=api_key, base_url=base_url)
-    check_cancelled(cancel_event)
-    frames = frame_paths or []
-    chapter_notes = _generate_chapter_notes(
-        client,
-        title=title,
-        transcript=transcript,
-        model=model,
-        on_progress=on_progress,
-        cancel_event=cancel_event,
-    )
-    detailed_material = (
-        "\n\n".join(chapter_notes)
-        if chapter_notes
-        else "（无可用转写，可能是纯音乐、无对白或 ASR 失败）"
-    )
-    output_language = {
-        "zh": "中文",
-        "en": "英文",
-        "ja": "日文",
-        "ko": "韩文",
-    }.get(language, language)
+    http_client = httpx.Client(timeout=httpx.Timeout(300.0)) if _uses_anthropic_messages() else None
+    try:
+        check_cancelled(cancel_event)
+        frames = frame_paths or []
+        chapter_notes = _generate_chapter_notes(
+            client,
+            http_client=http_client,
+            config=config,
+            title=title,
+            transcript=transcript,
+            model=model,
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+        )
+        detailed_material = (
+            "\n\n".join(chapter_notes)
+            if chapter_notes
+            else "（无可用转写，可能是纯音乐、无对白或 ASR 失败）"
+        )
+        output_language = {
+            "zh": "中文",
+            "en": "英文",
+            "ja": "日文",
+            "ko": "韩文",
+        }.get(language, language)
 
-    system = (
-        "你是资深知识编辑和可视化讲解者。请把全部章节材料提炼成一份"
-        "先速学、后深挖的知识笔记，让读者不看原视频也能迅速理解最有价值的内容。"
-        "忠于材料，不编造；合并重复信息，删除寒暄、推广和无信息量细节。"
-        "核心概念要用通俗语言解释是什么、为什么、如何工作、何时使用及其边界。"
-        "复杂流程、架构、依赖或因果关系适合时使用有效的 Mermaid 图，不为装饰而画图。"
-        "不要生成练习题、自测题、学习任务或泛泛的课程评价。"
-        "输出适合 Obsidian 阅读的 Markdown，不输出 YAML frontmatter、一级标题或重复的视频标题。"
-        f"使用{output_language}输出。"
-        "在回复最开头用 <<<TITLE>>> 和 <<<END>>> 包裹一个 10-30 字的简短笔记标题，"
-        "概括材料核心主题，不要包含'笔记'或'总结'字样。"
-    )
-
-    user_text = f"""请基于以下材料，提炼一份一眼能抓住精华、需要时又能继续深挖的知识笔记。
-
-【输入元信息】
-- 标题: {title}
-- 链接: {url}
-- 作者/频道: {uploader or "未知"}
-- 简介（可能截断）: {description or "无"}
-
-【已逐段覆盖的章节材料】
-{detailed_material}
-
-【编辑原则】
-1. 只保留能帮助读者理解、判断或执行的知识；同一事实只讲一次。
-2. 先给结论和全局关系，再解释原理与细节；术语首次出现时给出白话解释。
-3. 重要判断尽量附原视频时间戳，例如 `[12:34]`；无法从材料确认时明确说明，不猜测。
-4. 没有实质内容的可选章节直接省略，不用写“无”或硬凑篇幅。
-5. 不生成练习题、自测题、课后任务、学习目标清单或空泛感想。
-6. 不输出 YAML、一级标题或视频标题，必须从 `## 一眼看懂` 开始。
-
-【输出结构】
-## 一眼看懂
-使用以下顺序控制在约 600–1000 个中文字符，让读者在首屏附近抓住内容：
-
-> [!abstract] 一句话结论
-> 用一句具体的话说清这份材料最重要的结论。
-
-### 核心知识表
-使用 Markdown 表格，列为“知识｜通俗解释｜什么时候有用｜重要度”。重要度只使用“必懂、常用、补充”。
-
-> [!tip] 最短理解路径
-> 用 3–6 个带箭头的短步骤串起理解顺序；实操类内容则给出最短可执行路径。
-
-如果材料确有高风险误区，再添加：
-> [!warning] 最容易踩的坑
-> 只列会造成错误理解、失败或损失的关键问题。
-
-## 知识脉络
-解释核心知识之间的依赖、流程或因果关系。遇到至少 3 个相互关联节点的复杂流程、系统架构、
-状态变化或决策分支时，优先生成 1 幅 Mermaid 图；简单内容使用列表，不要硬画图。
-Mermaid 必须能直接在 Obsidian 渲染：使用 `flowchart LR` 或 `flowchart TD`，节点文字放在引号中，
-标签简短，连线写明动作或关系，并用 `classDef` 的浅黄、浅绿、浅蓝、浅紫区分不同角色。
-样式参考（按实际知识改写，不要照抄节点）：
-
-~~~mermaid
-flowchart LR
-    A["输入"] ==>|关键动作| B["处理"]
-    B --> C["结果"]
-    classDef input fill:#fff3bf,stroke:#e67700,stroke-width:2px,color:#111827
-    classDef process fill:#d3f9d8,stroke:#2f9e44,stroke-width:2px,color:#111827
-    classDef result fill:#d0ebff,stroke:#1971c2,stroke-width:2px,color:#111827
-    class A input
-    class B process
-    class C result
-~~~
-
-## 核心知识精讲
-按重要性排列，而不是机械照搬视频顺序。每个知识点使用三级标题，并包含：
-- **通俗理解**：先用日常语言讲明白。
-- **原理与价值**：解释为什么成立、解决什么问题。
-- **使用场景**：说明何时有用，何时不适用。
-- **例子或证据**：仅使用材料中的例子、命令、数据或画面证据。
-内容可按知识密度增减，不要为了统一格式重复同一句话。
-
-## 实际怎么做
-仅在材料包含可执行流程时保留。按真实顺序写出步骤、操作位置或命令、预期结果和判断方法；
-命令及代码使用带语言标识的代码块。
-
-## 对比与选择
-仅在存在容易混淆的概念或多种方案时保留。使用表格呈现差异、适用场景、优势、代价和选择依据。
-
-## 易错点与边界
-只收录材料支持的重要限制。优先使用“现象｜原因｜正确做法”表格，区分事实、讲者建议和不确定信息。
-
-## 画面中的关键信息
-仅在所附关键帧提供了旁白之外的有效信息时保留，解释界面、图表、代码或字幕具体说明了什么。
-
-## 最后记住
-用 3–7 条高信息密度结论收尾，每条都应当在脱离上下文后仍然有意义。
-
-全文详略随材料的信息密度，不设固定总字数，不凑篇幅。综合跨章节关系并去重，
-不要复制粘贴逐章材料；逐章材料稍后会作为折叠的追溯区自动附在文末。
-"""
-
-    if on_progress:
-        on_progress("提炼一眼看懂、知识脉络和核心知识", 0.86)
-    check_cancelled(cancel_event)
-
-    content: list[dict] = [{"type": "text", "text": user_text}]
-    # The pipeline already limits this list to the requested max_frames.
-    # Do not silently drop frames here: doing so made --max-frames misleading
-    # and caused cache metadata to disagree with what the model received.
-    for fp in frames:
-        b64 = _b64_image(fp)
-        content.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"},
-            }
+        system = (
+            "你是资深知识编辑和可视化讲解者。请把全部章节材料提炼成一份"
+            "先速学、后深挖的知识笔记，让读者不看原视频也能迅速理解最有价值的内容。"
+            "忠于材料，不编造；合并重复信息，删除寒暄、推广和无信息量细节。"
+            "核心概念要用通俗语言解释是什么、为什么、如何工作、何时使用及其边界。"
+            "复杂流程、架构、依赖或因果关系适合时使用有效的 Mermaid 图，不为装饰而画图。"
+            "不要生成练习题、自测题、学习任务或泛泛的课程评价。"
+            "输出适合 Obsidian 阅读的 Markdown，不输出 YAML frontmatter、一级标题或重复的视频标题。"
+            f"使用{output_language}输出。"
+            "在回复最开头用 <<<TITLE>>> 和 <<<END>>> 包裹一个 10-30 字的简短笔记标题，"
+            "概括材料核心主题，不要包含'笔记'或'总结'字样。"
         )
 
-    resp = _chat_completion(
-        client,
-        cancel_event=cancel_event,
-        model=model,
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": content},
-        ],
-        temperature=0.2,
-        max_tokens=6_000,
-    )
-    overview = _response_text(resp)
-    if on_progress:
-        on_progress("精华知识笔记生成完成", 1.0)
-    overview, note_title = _split_title(overview, title)
-    if not chapter_notes:
-        return SummarizeResult(body=overview, note_title=note_title)
-    chapter_callouts = [_chapter_callout(note) for note in chapter_notes]
-    body = (
-        f"{overview}\n\n## 逐章参考笔记\n\n"
-        "> [!info] 如何使用\n"
-        "> 以下内容按原视频时间顺序保留，用于追溯上下文；默认折叠，不影响精华阅读。\n\n"
-        + "\n\n".join(callout for callout in chapter_callouts if callout)
-    )
-    return SummarizeResult(body=body, note_title=note_title)
+        user_text = f"""请基于以下材料，提炼一份一眼能抓住精华、需要时又能继续深挖的知识笔记。
+
+    【输入元信息】
+    - 标题: {title}
+    - 链接: {url}
+    - 作者/频道: {uploader or "未知"}
+    - 简介（可能截断）: {description or "无"}
+
+    【已逐段覆盖的章节材料】
+    {detailed_material}
+
+    【编辑原则】
+    1. 只保留能帮助读者理解、判断或执行的知识；同一事实只讲一次。
+    2. 先给结论和全局关系，再解释原理与细节；术语首次出现时给出白话解释。
+    3. 重要判断尽量附原视频时间戳，例如 `[12:34]`；无法从材料确认时明确说明，不猜测。
+    4. 没有实质内容的可选章节直接省略，不用写“无”或硬凑篇幅。
+    5. 不生成练习题、自测题、课后任务、学习目标清单或空泛感想。
+    6. 不输出 YAML、一级标题或视频标题，必须从 `## 一眼看懂` 开始。
+
+    【输出结构】
+    ## 一眼看懂
+    使用以下顺序控制在约 600–1000 个中文字符，让读者在首屏附近抓住内容：
+
+    > [!abstract] 一句话结论
+    > 用一句具体的话说清这份材料最重要的结论。
+
+    ### 核心知识表
+    使用 Markdown 表格，列为“知识｜通俗解释｜什么时候有用｜重要度”。重要度只使用“必懂、常用、补充”。
+
+    > [!tip] 最短理解路径
+    > 用 3–6 个带箭头的短步骤串起理解顺序；实操类内容则给出最短可执行路径。
+
+    如果材料确有高风险误区，再添加：
+    > [!warning] 最容易踩的坑
+    > 只列会造成错误理解、失败或损失的关键问题。
+
+    ## 知识脉络
+    解释核心知识之间的依赖、流程或因果关系。遇到至少 3 个相互关联节点的复杂流程、系统架构、
+    状态变化或决策分支时，优先生成 1 幅 Mermaid 图；简单内容使用列表，不要硬画图。
+    Mermaid 必须能直接在 Obsidian 渲染：使用 `flowchart LR` 或 `flowchart TD`，节点文字放在引号中，
+    标签简短，连线写明动作或关系，并用 `classDef` 的浅黄、浅绿、浅蓝、浅紫区分不同角色。
+    样式参考（按实际知识改写，不要照抄节点）：
+
+    ~~~mermaid
+    flowchart LR
+        A["输入"] ==>|关键动作| B["处理"]
+        B --> C["结果"]
+        classDef input fill:#fff3bf,stroke:#e67700,stroke-width:2px,color:#111827
+        classDef process fill:#d3f9d8,stroke:#2f9e44,stroke-width:2px,color:#111827
+        classDef result fill:#d0ebff,stroke:#1971c2,stroke-width:2px,color:#111827
+        class A input
+        class B process
+        class C result
+    ~~~
+
+    ## 核心知识精讲
+    按重要性排列，而不是机械照搬视频顺序。每个知识点使用三级标题，并包含：
+    - **通俗理解**：先用日常语言讲明白。
+    - **原理与价值**：解释为什么成立、解决什么问题。
+    - **使用场景**：说明何时有用，何时不适用。
+    - **例子或证据**：仅使用材料中的例子、命令、数据或画面证据。
+    内容可按知识密度增减，不要为了统一格式重复同一句话。
+
+    ## 实际怎么做
+    仅在材料包含可执行流程时保留。按真实顺序写出步骤、操作位置或命令、预期结果和判断方法；
+    命令及代码使用带语言标识的代码块。
+
+    ## 对比与选择
+    仅在存在容易混淆的概念或多种方案时保留。使用表格呈现差异、适用场景、优势、代价和选择依据。
+
+    ## 易错点与边界
+    只收录材料支持的重要限制。优先使用“现象｜原因｜正确做法”表格，区分事实、讲者建议和不确定信息。
+
+    ## 画面中的关键信息
+    仅在所附关键帧提供了旁白之外的有效信息时保留，解释界面、图表、代码或字幕具体说明了什么。
+
+    ## 最后记住
+    用 3–7 条高信息密度结论收尾，每条都应当在脱离上下文后仍然有意义。
+
+    全文详略随材料的信息密度，不设固定总字数，不凑篇幅。综合跨章节关系并去重，
+    不要复制粘贴逐章材料；逐章材料稍后会作为折叠的追溯区自动附在文末。
+    """
+
+        if on_progress:
+            on_progress("提炼一眼看懂、知识脉络和核心知识", 0.86)
+        check_cancelled(cancel_event)
+
+        content: list[dict] = [{"type": "text", "text": user_text}]
+        # The pipeline already limits this list to the requested max_frames.
+        # Do not silently drop frames here: doing so made --max-frames misleading
+        # and caused cache metadata to disagree with what the model received.
+        for fp in frames:
+            b64 = _b64_image(fp)
+            content.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}", "detail": "high"},
+                }
+            )
+
+        resp = _chat_completion(
+            client,
+            cancel_event=cancel_event,
+            http_client=http_client,
+            config=config,
+            model=model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": content},
+            ],
+            temperature=0.2,
+            max_tokens=6_000,
+        )
+        overview = _response_text(resp)
+        if on_progress:
+            on_progress("精华知识笔记生成完成", 1.0)
+        overview, note_title = _split_title(overview, title)
+        if not chapter_notes:
+            return SummarizeResult(body=overview, note_title=note_title)
+        chapter_callouts = [_chapter_callout(note) for note in chapter_notes]
+        body = (
+            f"{overview}\n\n## 逐章参考笔记\n\n"
+            "> [!info] 如何使用\n"
+            "> 以下内容按原视频时间顺序保留，用于追溯上下文；默认折叠，不影响精华阅读。\n\n"
+            + "\n\n".join(callout for callout in chapter_callouts if callout)
+        )
+        return SummarizeResult(body=body, note_title=note_title)
+    finally:
+        if http_client:
+            http_client.close()

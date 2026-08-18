@@ -700,6 +700,17 @@ var SECRET_KEYS = [
   "API_KEY",
   "AUTH_TOKEN"
 ];
+function normalizeApiFormat(value) {
+  if (typeof value !== "string") return "chat_completions";
+  const normalized = value.trim().toLowerCase().replace("-", "_");
+  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
+    return "anthropic_messages";
+  }
+  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
+    return "responses";
+  }
+  return "chat_completions";
+}
 function asRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
@@ -957,8 +968,8 @@ function normalizeOpenAiBaseUrl(baseUrl) {
     throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u5305\u542B\u67E5\u8BE2\u53C2\u6570\u6216\u951A\u70B9");
   }
   const path = url.pathname.replace(/\/+$/, "");
-  if (/\/(?:chat\/completions|responses)$/i.test(path)) {
-    throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u4EE5 /chat/completions \u6216 /responses \u7ED3\u5C3E");
+  if (/\/(?:chat\/completions|responses|messages)$/i.test(path)) {
+    throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u4EE5 /chat/completions\u3001/responses \u6216 /messages \u7ED3\u5C3E");
   }
   url.pathname = path || "/";
   return url.toString();
@@ -997,16 +1008,21 @@ function responseErrorDetail(text) {
 }
 async function fetchOpenAiCompatibleModels(options) {
   const endpoint = openAiModelsUrl(options.baseUrl);
+  const isAnthropic = normalizeApiFormat(options.apiFormat) === "anthropic_messages";
+  const headers = { Accept: "application/json" };
+  if (isAnthropic) {
+    headers["x-api-key"] = options.apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers.Authorization = `Bearer ${options.apiKey}`;
+  }
   let timeout;
   try {
     const response = await Promise.race([
       (0, import_obsidian.requestUrl)({
         url: endpoint,
         method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${options.apiKey}`
-        },
+        headers,
         throw: false
       }),
       new Promise((_, reject) => {
@@ -1014,7 +1030,7 @@ async function fetchOpenAiCompatibleModels(options) {
       })
     ]);
     if (response.status < 200 || response.status >= 300) {
-      const label = response.status === 401 || response.status === 403 ? "\u6A21\u578B\u63A5\u53E3\u9274\u6743\u5931\u8D25" : response.status === 404 ? "\u672A\u627E\u5230\u6A21\u578B\u63A5\u53E3" : "\u6A21\u578B\u63A5\u53E3\u8BF7\u6C42\u5931\u8D25";
+      const label = response.status === 401 ? "\u6A21\u578B\u63A5\u53E3\u9274\u6743\u5931\u8D25" : response.status === 403 ? "\u6A21\u578B\u63A5\u53E3\u8BF7\u6C42\u88AB\u62D2\u7EDD" : response.status === 404 ? "\u672A\u627E\u5230\u6A21\u578B\u63A5\u53E3" : "\u6A21\u578B\u63A5\u53E3\u8BF7\u6C42\u5931\u8D25";
       const detail = responseErrorDetail(response.text);
       throw new Error(`${label} (HTTP ${response.status})${detail ? `\uFF1A${detail}` : ""}`);
     }
@@ -1047,6 +1063,74 @@ async function fetchCcSwitchProviderModels(options) {
     baseUrl: runtime.baseUrl,
     apiKey: runtime.apiKey
   });
+}
+function openAiEndpointUrl(baseUrl, suffix) {
+  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = path ? `${path}/${suffix}` : `v1/${suffix}`;
+  return url.toString();
+}
+function httpStatusLabel(status) {
+  if (status === 401) return "\u9274\u6743\u5931\u8D25";
+  if (status === 403) return "\u8BF7\u6C42\u88AB\u62D2\u7EDD";
+  if (status === 404) return "\u6A21\u578B\u6216\u63A5\u53E3\u4E0D\u5B58\u5728";
+  if (status === 429) return "\u8BF7\u6C42\u9891\u7387\u8D85\u9650";
+  if (status >= 500) return "\u670D\u52A1\u7AEF\u4E0D\u53EF\u7528";
+  return "\u8BF7\u6C42\u5931\u8D25";
+}
+async function probeOpenAiCompatibleModel(options) {
+  const format = normalizeApiFormat(options.apiFormat);
+  const isAnthropic = format === "anthropic_messages";
+  const isResponses = format === "responses";
+  const endpoint = openAiEndpointUrl(
+    options.baseUrl,
+    isAnthropic ? "messages" : isResponses ? "responses" : "chat/completions"
+  );
+  const body = isAnthropic ? {
+    model: options.model,
+    max_tokens: 8,
+    messages: [{ role: "user", content: "ping" }]
+  } : isResponses ? { model: options.model, input: "ping" } : {
+    model: options.model,
+    messages: [{ role: "user", content: "ping" }],
+    max_tokens: 8
+  };
+  const headers = {
+    "Content-Type": "application/json",
+    Accept: "application/json"
+  };
+  if (isAnthropic) {
+    headers["x-api-key"] = options.apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers.Authorization = `Bearer ${options.apiKey}`;
+  }
+  let timeout;
+  try {
+    const response = await Promise.race([
+      (0, import_obsidian.requestUrl)({
+        url: endpoint,
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        throw: false
+      }),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("\u6A21\u578B\u8BF7\u6C42\u8D85\u65F6\uFF0830 \u79D2\uFF09")), 3e4);
+      })
+    ]);
+    if (response.status < 200 || response.status >= 300) {
+      const detail = responseErrorDetail(response.text);
+      const label = httpStatusLabel(response.status);
+      throw new Error(`${label} (HTTP ${response.status})${detail ? `\uFF1A${detail}` : ""}`);
+    }
+    return { endpoint, model: options.model };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message.replaceAll(options.apiKey, "***"));
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 // src/run-progress.ts
@@ -1225,19 +1309,65 @@ var DEFAULT_SETTINGS = {
   ccSwitchFollowCurrent: true,
   ccSwitchProviderId: "",
   model: "",
-  customProviderName: "",
-  customProviderBaseUrl: "",
-  customProviderApiKey: "",
-  customProviderModel: "",
-  customProviderApiFormat: "chat_completions",
+  customProviders: [],
+  activeCustomProviderId: "",
   targetFolder: "Video Memos",
   cleanupMedia: false
 };
+function normalizeApiFormat2(value) {
+  if (typeof value !== "string") return "chat_completions";
+  const normalized = value.trim().toLowerCase().replace("-", "_");
+  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
+    return "anthropic_messages";
+  }
+  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
+    return "responses";
+  }
+  return "chat_completions";
+}
+function normalizeCustomProviders(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (let index = 0; index < raw.length; index++) {
+    const item = raw[index];
+    if (!item || typeof item !== "object") continue;
+    const name = typeof item.name === "string" ? item.name : "";
+    const baseUrl = typeof item.baseUrl === "string" ? item.baseUrl : "";
+    const apiKey = typeof item.apiKey === "string" ? item.apiKey : "";
+    const model = typeof item.model === "string" ? item.model : "";
+    const apiFormat = normalizeApiFormat2(item.apiFormat);
+    let id = typeof item.id === "string" && item.id ? item.id : `cp_${Date.now()}_${index}`;
+    if (seen.has(id)) id = `${id}_${index}`;
+    seen.add(id);
+    result.push({ id, name, baseUrl, apiKey, model, apiFormat });
+  }
+  return result;
+}
 function normalizeSettings(stored) {
   const stringValue = (value, fallback) => typeof value === "string" ? value : fallback;
   const storedProviderSource = stored?.providerSource;
-  const providerSource = storedProviderSource === "environment" || storedProviderSource === "custom" ? storedProviderSource : "ccswitch";
-  const customProviderApiFormat = stored?.customProviderApiFormat === "responses" ? "responses" : "chat_completions";
+  const providerSource = storedProviderSource === "custom" ? "custom" : "ccswitch";
+  let customProviders = normalizeCustomProviders(stored?.customProviders);
+  const legacy = stored;
+  const legacyBaseUrl = typeof legacy?.customProviderBaseUrl === "string" ? legacy.customProviderBaseUrl : "";
+  const legacyApiKey = typeof legacy?.customProviderApiKey === "string" ? legacy.customProviderApiKey : "";
+  if (customProviders.length === 0 && (legacyBaseUrl.trim() || legacyApiKey.trim())) {
+    const migrated = {
+      id: `cp_migrated_${Date.now()}`,
+      name: typeof legacy?.customProviderName === "string" ? legacy.customProviderName : "\u5DF2\u8FC1\u79FB\u4F9B\u5E94\u5546",
+      baseUrl: legacyBaseUrl,
+      apiKey: legacyApiKey,
+      model: typeof legacy?.customProviderModel === "string" ? legacy.customProviderModel : "",
+      apiFormat: normalizeApiFormat2(legacy?.customProviderApiFormat)
+    };
+    customProviders = [migrated];
+  }
+  const activeCustomProviderId = stringValue(
+    stored?.activeCustomProviderId,
+    customProviders[0]?.id ?? ""
+  );
+  const activeIdIsValid = customProviders.some((p) => p.id === activeCustomProviderId);
   return {
     projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
     providerSource,
@@ -1249,35 +1379,24 @@ function normalizeSettings(stored) {
       DEFAULT_SETTINGS.ccSwitchProviderId
     ),
     model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
-    customProviderName: stringValue(
-      stored?.customProviderName,
-      DEFAULT_SETTINGS.customProviderName
-    ),
-    customProviderBaseUrl: stringValue(
-      stored?.customProviderBaseUrl,
-      DEFAULT_SETTINGS.customProviderBaseUrl
-    ),
-    customProviderApiKey: stringValue(
-      stored?.customProviderApiKey,
-      DEFAULT_SETTINGS.customProviderApiKey
-    ),
-    customProviderModel: stringValue(
-      stored?.customProviderModel,
-      DEFAULT_SETTINGS.customProviderModel
-    ),
-    customProviderApiFormat,
+    customProviders,
+    activeCustomProviderId: activeIdIsValid ? activeCustomProviderId : customProviders[0]?.id ?? "",
     targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
     cleanupMedia: typeof stored?.cleanupMedia === "boolean" ? stored.cleanupMedia : DEFAULT_SETTINGS.cleanupMedia
   };
 }
+function activeCustomProvider(settings) {
+  const list = settings.customProviders;
+  if (list.length === 0) return null;
+  return list.find((p) => p.id === settings.activeCustomProviderId) ?? list[0] ?? null;
+}
 function describeProviderSelection(settings) {
-  if (settings.providerSource === "environment") {
-    return settings.model ? `\u73AF\u5883\u914D\u7F6E \xB7 ${settings.model}` : "\u4F7F\u7528\u9879\u76EE\u73AF\u5883\u53D8\u91CF\u914D\u7F6E";
-  }
   if (settings.providerSource === "custom") {
-    const name = settings.customProviderName.trim() || "\u672A\u547D\u540D\u4F9B\u5E94\u5546";
-    const model = settings.customProviderModel.trim();
-    if (!settings.customProviderBaseUrl.trim() || !settings.customProviderApiKey.trim()) {
+    const provider = activeCustomProvider(settings);
+    if (!provider) return "\u81EA\u5B9A\u4E49 \xB7 \u5C1A\u672A\u6DFB\u52A0\u4F9B\u5E94\u5546";
+    const name = provider.name.trim() || "\u672A\u547D\u540D\u4F9B\u5E94\u5546";
+    const model = provider.model.trim();
+    if (!provider.baseUrl.trim() || !provider.apiKey.trim()) {
       return `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u914D\u7F6E\u9700\u8981\u68C0\u67E5`;
     }
     return model ? `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u6A21\u578B ${model}` : `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u5C1A\u672A\u9009\u62E9\u6A21\u578B`;
@@ -1351,7 +1470,7 @@ var CcSwitchProviderSettingsView = class {
   configTab = "parsed";
   rawDetailExpanded = false;
   providerModelStates = /* @__PURE__ */ new Map();
-  customModelState = null;
+  customModelStates = /* @__PURE__ */ new Map();
   customDraft = null;
   modelRequestId = 0;
   constructor(options) {
@@ -1361,9 +1480,18 @@ var CcSwitchProviderSettingsView = class {
     this.selectedProviderId = "";
     this.visibleSource = null;
     this.customDraft = null;
-    this.customModelState = null;
+    this.customModelStates.clear();
     this.configTab = "parsed";
     this.rawDetailExpanded = false;
+  }
+  customModelStateKey(draftId) {
+    return draftId ?? "__new_custom_provider__";
+  }
+  customModelStateFor(draftId) {
+    return this.customModelStates.get(this.customModelStateKey(draftId)) ?? null;
+  }
+  setCustomModelState(draftId, state) {
+    this.customModelStates.set(this.customModelStateKey(draftId), state);
   }
   render(parent) {
     const settings = this.options.getSettings();
@@ -1403,22 +1531,14 @@ var CcSwitchProviderSettingsView = class {
     const heading = section.createDiv({ cls: "ccswitch-heading" });
     const headingCopy = heading.createDiv();
     headingCopy.createEl("h2", { text: "\u4F9B\u5E94\u5546" });
-    headingCopy.createEl("p", {
-      text: "\u9009\u62E9 cc-switch\u3001\u9879\u76EE\u73AF\u5883\u914D\u7F6E\uFF0C\u6216\u6DFB\u52A0 OpenAI-compatible \u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u3002"
-    });
     const sourceSwitch = heading.createDiv({
       cls: "ccswitch-source-switch",
       attr: { "aria-label": "\u4F9B\u5E94\u5546\u914D\u7F6E\u6765\u6E90" }
     });
     this.renderSourceButton(sourceSwitch, "cc-switch", "database", "ccswitch", source);
-    this.renderSourceButton(sourceSwitch, "\u73AF\u5883\u914D\u7F6E", "file-cog", "environment", source);
     this.renderSourceButton(sourceSwitch, "\u81EA\u5B9A\u4E49", "sliders-horizontal", "custom", source);
     if (source === "custom") {
       this.renderCustomProvider(section, settings);
-      return false;
-    }
-    if (source === "environment") {
-      this.renderEnvironmentSource(section, settings);
       return false;
     }
     this.renderDatabaseCard(section, response?.dbPath ?? null, loadError);
@@ -1484,8 +1604,10 @@ var CcSwitchProviderSettingsView = class {
       this.selectedProviderId = "";
       this.visibleSource = source;
       if (source === "custom") {
-        this.customDraft = this.customDraft ?? this.customDraftFromSettings();
-        this.options.rerender();
+        this.customDraft = null;
+        void this.options.updateSettings({ providerSource: "custom" }).then(() => {
+          this.options.rerender();
+        });
         return;
       }
       void this.options.updateSettings({ providerSource: source }).then(() => {
@@ -1495,66 +1617,139 @@ var CcSwitchProviderSettingsView = class {
   }
   customDraftFromSettings() {
     const settings = this.options.getSettings();
+    const active = settings.customProviders.find((p) => p.id === settings.activeCustomProviderId) ?? settings.customProviders[0];
+    if (active) {
+      return {
+        id: active.id,
+        name: active.name,
+        baseUrl: active.baseUrl,
+        apiKey: active.apiKey,
+        model: active.model,
+        apiFormat: active.apiFormat
+      };
+    }
     return {
-      name: settings.customProviderName,
-      baseUrl: settings.customProviderBaseUrl,
-      apiKey: settings.customProviderApiKey,
-      model: settings.customProviderModel,
-      apiFormat: settings.customProviderApiFormat
+      id: null,
+      name: "",
+      baseUrl: "",
+      apiKey: "",
+      model: "",
+      apiFormat: "chat_completions"
     };
   }
-  renderEnvironmentSource(parent, settings) {
-    const card = parent.createDiv({ cls: "ccswitch-custom-card" });
-    const title = card.createDiv({ cls: "ccswitch-section-title" });
-    icon(title, "file-cog");
-    title.createSpan({ text: "\u9879\u76EE\u73AF\u5883\u914D\u7F6E" });
-    card.createDiv({
-      cls: "ccswitch-custom-hint",
-      text: "\u4F7F\u7528\u9879\u76EE .env\u3001\u7CFB\u7EDF\u73AF\u5883\u53D8\u91CF\u6216 ~/.grok/config.toml \u4E2D\u7684 API \u914D\u7F6E\u3002"
-    });
-    const form = card.createDiv({ cls: "ccswitch-custom-form" });
-    this.renderCustomTextField(form, {
-      label: "\u6A21\u578B\u8986\u76D6\uFF08\u53EF\u9009\uFF09",
-      value: settings.model,
-      placeholder: "\u7559\u7A7A\u65F6\u4F7F\u7528\u73AF\u5883\u914D\u7F6E\u4E2D\u7684\u6A21\u578B",
-      onInput: (value) => {
-        void this.options.updateSettings({ model: value.trim() });
-      }
-    });
-    const actions = card.createDiv({ cls: "ccswitch-custom-action-row" });
-    actionButton(actions, {
-      label: settings.providerSource === "environment" ? "\u6B63\u5728\u4F7F\u7528" : "\u4F7F\u7528\u73AF\u5883\u914D\u7F6E",
-      icon: settings.providerSource === "environment" ? "check" : "play",
-      primary: settings.providerSource !== "environment",
-      disabled: settings.providerSource === "environment",
-      onClick: () => {
-        void this.options.updateSettings({ providerSource: "environment" }).then(() => {
-          this.options.rerender();
-        });
-      }
-    });
-  }
   renderCustomProvider(parent, settings) {
-    const draft = this.customDraft ??= this.customDraftFromSettings();
     const card = parent.createDiv({ cls: "ccswitch-custom-card" });
     const heading = card.createDiv({ cls: "ccswitch-custom-heading" });
     const title = heading.createDiv({ cls: "ccswitch-section-title" });
     icon(title, "sliders-horizontal");
-    title.createSpan({ text: "OpenAI-compatible \u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546" });
-    if (settings.providerSource === "custom") badge(heading, "\u4F7F\u7528\u4E2D", "accent");
-    card.createDiv({
-      cls: "ccswitch-custom-hint",
-      text: "\u586B\u5199 API \u6839\u5730\u5740\uFF08\u4F8B\u5982 https://example.com/v1\uFF09\uFF0C\u4E0D\u8981\u586B\u5199 /chat/completions\u3002"
+    title.createSpan({ text: "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546" });
+    actionButton(heading, {
+      label: "\u6DFB\u52A0\u4F9B\u5E94\u5546",
+      icon: "plus",
+      onClick: () => {
+        this.customModelStates.delete(this.customModelStateKey(null));
+        this.customDraft = {
+          id: null,
+          name: "",
+          baseUrl: "",
+          apiKey: "",
+          model: "",
+          apiFormat: "chat_completions"
+        };
+        this.options.rerender();
+      }
     });
-    const form = card.createDiv({ cls: "ccswitch-custom-form" });
+    const providers = settings.customProviders;
+    if (providers.length > 0) {
+      const list = card.createDiv({ cls: "ccswitch-custom-provider-list" });
+      for (const provider of providers) {
+        this.renderCustomProviderRow(list, provider, settings);
+      }
+    }
+    const draft = this.customDraft ?? this.customDraftFromSettings();
+    this.renderCustomProviderForm(card, draft, settings);
+  }
+  renderCustomProviderRow(parent, provider, settings) {
+    const row = parent.createDiv({ cls: "ccswitch-custom-provider-entry" });
+    const isActive = settings.providerSource === "custom" && settings.activeCustomProviderId === provider.id;
+    const copy = row.createDiv({ cls: "ccswitch-custom-provider-entry-copy" });
+    copy.createDiv({
+      cls: "ccswitch-custom-provider-entry-name",
+      text: provider.name.trim() || "\u672A\u547D\u540D\u4F9B\u5E94\u5546"
+    });
+    const subtitle = provider.model.trim() || "\u5C1A\u672A\u9009\u62E9\u6A21\u578B";
+    const formatLabel = provider.apiFormat === "anthropic_messages" ? "Anthropic" : provider.apiFormat === "responses" ? "Responses" : "Chat";
+    copy.createDiv({
+      cls: "ccswitch-custom-provider-entry-sub",
+      text: `${subtitle} \xB7 ${formatLabel}`
+    });
+    if (isActive) badge(row, "\u4F7F\u7528\u4E2D", "accent");
+    const trailing = row.createDiv({ cls: "ccswitch-custom-provider-entry-actions" });
+    actionButton(trailing, {
+      label: isActive ? "\u4F7F\u7528\u4E2D" : "\u4F7F\u7528",
+      icon: isActive ? "check" : "play",
+      primary: !isActive,
+      disabled: isActive,
+      onClick: () => this.activateExistingProvider(provider.id)
+    });
+    actionButton(trailing, {
+      label: "\u7F16\u8F91",
+      icon: "pencil",
+      onClick: () => {
+        this.customDraft = {
+          id: provider.id,
+          name: provider.name,
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+          model: provider.model,
+          apiFormat: provider.apiFormat
+        };
+        this.options.rerender();
+      }
+    });
+    actionButton(trailing, {
+      label: "\u5220\u9664",
+      icon: "trash-2",
+      onClick: () => this.deleteCustomProvider(provider.id)
+    });
+    row.addEventListener("click", (event) => {
+      if (event.target.closest("button")) return;
+      this.customDraft = {
+        id: provider.id,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: provider.model,
+        apiFormat: provider.apiFormat
+      };
+      this.options.rerender();
+    });
+  }
+  renderCustomProviderForm(parent, draft, settings) {
+    const form = parent.createDiv({ cls: "ccswitch-custom-form" });
+    const formTitle = form.createDiv({ cls: "ccswitch-custom-form-title" });
+    formTitle.createSpan({
+      text: draft.id ? "\u7F16\u8F91\u4F9B\u5E94\u5546" : "\u65B0\u4F9B\u5E94\u5546"
+    });
+    const modelState = this.customModelStateFor(draft.id);
     const status = form.createDiv({
-      cls: `ccswitch-custom-status${this.customModelState?.status === "loaded" ? " is-success" : this.customModelState?.status === "error" ? " is-error" : ""}`,
-      text: this.customStatusText()
+      cls: `ccswitch-custom-status${modelState?.status === "loaded" ? " is-success" : modelState?.status === "error" ? " is-error" : ""}`,
+      text: this.customStatusText(draft.id)
     });
+    let discoveredModelSelect = null;
     const invalidateTest = () => {
-      this.customModelState = null;
+      this.customModelStates.delete(this.customModelStateKey(draft.id));
       status.className = "ccswitch-custom-status is-warning";
       status.setText("\u914D\u7F6E\u5DF2\u66F4\u6539\uFF0C\u8BF7\u91CD\u65B0\u6D4B\u8BD5\u8FDE\u63A5");
+      if (discoveredModelSelect) {
+        discoveredModelSelect.empty();
+        discoveredModelSelect.createEl("option", {
+          value: "",
+          text: "\u5237\u65B0\u540E\u53EF\u9009\u62E9\u6A21\u578B"
+        });
+        discoveredModelSelect.value = "";
+        discoveredModelSelect.disabled = true;
+      }
     };
     this.renderCustomTextField(form, {
       label: "\u4F9B\u5E94\u5546\u540D\u79F0",
@@ -1617,6 +1812,7 @@ var CcSwitchProviderSettingsView = class {
       cls: "dropdown ccswitch-custom-select",
       attr: { "aria-label": "\u9009\u62E9 API \u683C\u5F0F" }
     });
+    formatSelect.createEl("option", { value: "anthropic_messages", text: "Anthropic Messages" });
     formatSelect.createEl("option", { value: "chat_completions", text: "Chat Completions" });
     formatSelect.createEl("option", { value: "responses", text: "Responses API" });
     formatSelect.value = draft.apiFormat;
@@ -1627,24 +1823,41 @@ var CcSwitchProviderSettingsView = class {
     const modelField = form.createDiv({ cls: "ccswitch-custom-field" });
     modelField.createEl("label", { text: "\u6A21\u578B" });
     const modelRow = modelField.createDiv({ cls: "ccswitch-custom-model-controls" });
+    const models = modelState?.status === "loaded" ? modelState.models : [];
+    const modelSelect = modelRow.createEl("select", {
+      cls: "dropdown ccswitch-custom-model-select",
+      attr: { "aria-label": "\u9009\u62E9\u5DF2\u53D1\u73B0\u6A21\u578B" }
+    });
+    discoveredModelSelect = modelSelect;
+    modelSelect.createEl("option", {
+      value: "",
+      text: models.length > 0 ? "\u9009\u62E9\u5DF2\u53D1\u73B0\u6A21\u578B\u2026" : "\u5237\u65B0\u540E\u53EF\u9009\u62E9\u6A21\u578B"
+    });
+    for (const model of models) {
+      modelSelect.createEl("option", { value: model, text: model });
+    }
+    modelSelect.disabled = models.length === 0;
+    modelSelect.value = models.includes(draft.model) ? draft.model : "";
     const modelInput = modelRow.createEl("input", {
+      cls: "ccswitch-custom-model-input",
       attr: {
         type: "text",
         value: draft.model,
-        placeholder: "\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0",
-        list: "video-memo-custom-models",
-        "aria-label": "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u6A21\u578B"
+        placeholder: "\u4E5F\u53EF\u624B\u52A8\u8F93\u5165\u6A21\u578B\u540D\u79F0",
+        "aria-label": "\u624B\u52A8\u8F93\u5165\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u6A21\u578B"
       }
     });
-    const modelList = modelRow.createEl("datalist", { attr: { id: "video-memo-custom-models" } });
-    for (const model of this.customModelState?.models ?? []) {
-      modelList.createEl("option", { value: model });
-    }
+    modelSelect.addEventListener("change", () => {
+      if (!modelSelect.value) return;
+      draft.model = modelSelect.value;
+      modelInput.value = modelSelect.value;
+    });
     modelInput.addEventListener("input", () => {
       draft.model = modelInput.value;
+      modelSelect.value = models.includes(modelInput.value) ? modelInput.value : "";
     });
-    const actions = card.createDiv({ cls: "ccswitch-custom-action-row" });
-    const loading = this.customModelState?.status === "loading";
+    const actions = form.createDiv({ cls: "ccswitch-custom-action-row" });
+    const loading = modelState?.status === "loading";
     actionButton(actions, {
       label: loading ? "\u8FDE\u63A5\u4E2D..." : "\u5237\u65B0\u6A21\u578B",
       icon: loading ? "loader-circle" : "refresh-cw",
@@ -1658,10 +1871,10 @@ var CcSwitchProviderSettingsView = class {
       onClick: () => this.startCustomModelRequest(true)
     });
     actionButton(actions, {
-      label: settings.providerSource === "custom" ? "\u4FDD\u5B58\u5E76\u7EE7\u7EED\u4F7F\u7528" : "\u4F7F\u7528\u6B64\u914D\u7F6E",
+      label: draft.id ? "\u4FDD\u5B58\u5E76\u4F7F\u7528" : "\u6DFB\u52A0\u5E76\u4F7F\u7528",
       icon: "check",
       primary: true,
-      onClick: () => this.activateCustomProvider()
+      onClick: () => this.saveCustomProvider()
     });
   }
   renderCustomTextField(parent, options) {
@@ -1681,68 +1894,129 @@ var CcSwitchProviderSettingsView = class {
       return false;
     }
   }
-  customStatusText() {
-    const state = this.customModelState;
+  customStatusText(draftId) {
+    const state = this.customModelStateFor(draftId);
     if (!state) return "\u5C1A\u672A\u6D4B\u8BD5\u8FDE\u63A5";
-    if (state.status === "loading") return "\u6B63\u5728\u9A8C\u8BC1 URL\u3001Key \u5E76\u83B7\u53D6\u6A21\u578B\u5217\u8868...";
-    if (state.status === "error") return `\u8FDE\u63A5\u5931\u8D25\uFF1A${state.error}`;
-    return `\u8FDE\u63A5\u6210\u529F\uFF1A\u53D1\u73B0 ${state.models.length} \u4E2A\u6A21\u578B`;
+    if (state.status === "loading") return "\u6B63\u5728\u83B7\u53D6\u6A21\u578B\u5217\u8868...";
+    if (state.status === "error") return `\u6A21\u578B\u5217\u8868\u83B7\u53D6\u5931\u8D25\uFF1A${state.error}`;
+    if (state.probeStatus === "probing") return "\u6B63\u5728\u53D1\u9001\u771F\u5B9E\u6A21\u578B\u8BF7\u6C42...";
+    if (state.probeStatus === "probe_error") return `\u6A21\u578B\u8C03\u7528\u5931\u8D25\uFF1A${state.probeError}`;
+    if (state.probeStatus === "probed") return `\u6A21\u578B\u8C03\u7528\u6210\u529F\uFF1A\u53D1\u73B0 ${state.models.length} \u4E2A\u6A21\u578B\uFF0C\u6A21\u578B\u53EF\u6B63\u5E38\u8C03\u7528`;
+    return `\u6A21\u578B\u63A5\u53E3\u53EF\u7528\uFF1A\u53D1\u73B0 ${state.models.length} \u4E2A\u6A21\u578B\uFF08\u672A\u6D4B\u8BD5\u6A21\u578B\u8C03\u7528\uFF09`;
   }
   startCustomModelRequest(showNotice) {
     const draft = this.customDraft ??= this.customDraftFromSettings();
+    const draftId = draft.id;
     if (!draft.baseUrl.trim() || !draft.apiKey.trim()) {
       const message = "\u8BF7\u5148\u586B\u5199 API Base URL \u548C API Key";
-      this.customModelState = {
+      this.setCustomModelState(draftId, {
         requestId: ++this.modelRequestId,
         status: "error",
         models: [],
         endpoint: "",
-        error: message
-      };
+        error: message,
+        probeStatus: "idle",
+        probeError: ""
+      });
       if (showNotice) new import_obsidian3.Notice(message);
       this.options.rerender();
       return;
     }
     const requestId = ++this.modelRequestId;
-    this.customModelState = {
+    this.setCustomModelState(draftId, {
       requestId,
       status: "loading",
       models: [],
       endpoint: "",
-      error: ""
-    };
+      error: "",
+      probeStatus: "idle",
+      probeError: ""
+    });
     this.options.rerender();
     void fetchOpenAiCompatibleModels({
       baseUrl: draft.baseUrl,
-      apiKey: draft.apiKey
+      apiKey: draft.apiKey,
+      apiFormat: draft.apiFormat
     }).then((response) => {
-      if (this.customModelState?.requestId !== requestId) return;
-      this.customModelState = {
+      const current = this.customModelStateFor(draftId);
+      if (current?.requestId !== requestId) return;
+      this.setCustomModelState(draftId, {
         requestId,
         status: "loaded",
         models: response.models,
         endpoint: response.endpoint,
-        error: ""
-      };
+        error: "",
+        probeStatus: "idle",
+        probeError: ""
+      });
       if (!draft.model && response.models.length > 0) draft.model = response.models[0];
-      if (showNotice) new import_obsidian3.Notice(`\u8FDE\u63A5\u6210\u529F\uFF0C\u53D1\u73B0 ${response.models.length} \u4E2A\u6A21\u578B`);
-      this.options.rerender();
+      if (showNotice) {
+        this.probeModel(draft, requestId);
+      } else {
+        new import_obsidian3.Notice(`\u5237\u65B0\u6210\u529F\uFF0C\u53D1\u73B0 ${response.models.length} \u4E2A\u6A21\u578B`);
+        this.options.rerender();
+      }
     }).catch((error) => {
-      if (this.customModelState?.requestId !== requestId) return;
+      const current = this.customModelStateFor(draftId);
+      if (current?.requestId !== requestId) return;
       const message = error instanceof Error ? error.message : String(error);
-      this.customModelState = {
+      this.setCustomModelState(draftId, {
         requestId,
         status: "error",
         models: [],
         endpoint: "",
-        error: message
-      };
+        error: message,
+        probeStatus: "idle",
+        probeError: ""
+      });
       if (showNotice) new import_obsidian3.Notice(`\u8FDE\u63A5\u5931\u8D25
 ${message}`, 8e3);
       this.options.rerender();
     });
   }
-  activateCustomProvider() {
+  probeModel(draft, listRequestId) {
+    const draftId = draft.id;
+    const model = draft.model.trim();
+    if (!model) {
+      const current2 = this.customModelStateFor(draftId);
+      if (current2?.requestId === listRequestId) {
+        this.setCustomModelState(draftId, {
+          ...current2,
+          probeStatus: "probe_error",
+          probeError: "\u8BF7\u5148\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0"
+        });
+        new import_obsidian3.Notice("\u8BF7\u5148\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0", 8e3);
+        this.options.rerender();
+      }
+      return;
+    }
+    const current = this.customModelStateFor(draftId);
+    if (current?.requestId === listRequestId) {
+      this.setCustomModelState(draftId, { ...current, probeStatus: "probing" });
+      this.options.rerender();
+    }
+    void probeOpenAiCompatibleModel({
+      baseUrl: draft.baseUrl,
+      apiKey: draft.apiKey,
+      model,
+      apiFormat: draft.apiFormat
+    }).then(() => {
+      const state = this.customModelStateFor(draftId);
+      if (state?.requestId !== listRequestId) return;
+      this.setCustomModelState(draftId, { ...state, probeStatus: "probed", probeError: "" });
+      new import_obsidian3.Notice(`\u8FDE\u63A5\u6210\u529F\uFF0C\u6A21\u578B ${model} \u53EF\u6B63\u5E38\u8C03\u7528`);
+      this.options.rerender();
+    }).catch((error) => {
+      const state = this.customModelStateFor(draftId);
+      if (state?.requestId !== listRequestId) return;
+      const message = error instanceof Error ? error.message : String(error);
+      this.setCustomModelState(draftId, { ...state, probeStatus: "probe_error", probeError: message });
+      new import_obsidian3.Notice(`\u6A21\u578B\u8C03\u7528\u5931\u8D25
+${message}`, 8e3);
+      this.options.rerender();
+    });
+  }
+  saveCustomProvider() {
     const draft = this.customDraft ??= this.customDraftFromSettings();
     try {
       const name = draft.name.trim();
@@ -1752,22 +2026,68 @@ ${message}`, 8e3);
       if (!name) throw new Error("\u8BF7\u586B\u5199\u4F9B\u5E94\u5546\u540D\u79F0");
       if (!apiKey) throw new Error("\u8BF7\u586B\u5199 API Key");
       if (!model) throw new Error("\u8BF7\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0");
+      const settings = this.options.getSettings();
+      const isNew = draft.id === null;
+      const previousStateKey = this.customModelStateKey(draft.id);
+      let providers;
+      let activeId;
+      if (draft.id) {
+        providers = settings.customProviders.map(
+          (p) => p.id === draft.id ? { id: p.id, name, baseUrl, apiKey, model, apiFormat: draft.apiFormat } : p
+        );
+        activeId = draft.id;
+      } else {
+        const newId = `cp_${Date.now()}`;
+        providers = [
+          ...settings.customProviders,
+          { id: newId, name, baseUrl, apiKey, model, apiFormat: draft.apiFormat }
+        ];
+        activeId = newId;
+        draft.id = newId;
+        const pendingState = this.customModelStates.get(previousStateKey);
+        if (pendingState) {
+          this.customModelStates.set(newId, pendingState);
+          this.customModelStates.delete(previousStateKey);
+        }
+      }
       void this.options.updateSettings({
         providerSource: "custom",
-        customProviderName: name,
-        customProviderBaseUrl: baseUrl,
-        customProviderApiKey: apiKey,
-        customProviderModel: model,
-        customProviderApiFormat: draft.apiFormat
+        customProviders: providers,
+        activeCustomProviderId: activeId
       }).then(() => {
-        this.visibleSource = "custom";
         this.customDraft = this.customDraftFromSettings();
-        new import_obsidian3.Notice("\u5DF2\u542F\u7528\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546");
+        new import_obsidian3.Notice(isNew ? "\u5DF2\u6DFB\u52A0\u4F9B\u5E94\u5546" : "\u5DF2\u4FDD\u5B58\u4F9B\u5E94\u5546");
         this.options.rerender();
       });
     } catch (error) {
       new import_obsidian3.Notice(error instanceof Error ? error.message : String(error), 8e3);
     }
+  }
+  activateExistingProvider(providerId) {
+    void this.options.updateSettings({
+      providerSource: "custom",
+      activeCustomProviderId: providerId
+    }).then(() => {
+      new import_obsidian3.Notice("\u5DF2\u5207\u6362\u4F9B\u5E94\u5546");
+      this.options.rerender();
+    });
+  }
+  deleteCustomProvider(providerId) {
+    const settings = this.options.getSettings();
+    const providers = settings.customProviders.filter((p) => p.id !== providerId);
+    let activeId = settings.activeCustomProviderId;
+    if (activeId === providerId) {
+      activeId = providers[0]?.id ?? "";
+    }
+    void this.options.updateSettings({
+      customProviders: providers,
+      activeCustomProviderId: activeId
+    }).then(() => {
+      this.customModelStates.delete(providerId);
+      this.customDraft = null;
+      new import_obsidian3.Notice("\u5DF2\u5220\u9664\u4F9B\u5E94\u5546");
+      this.options.rerender();
+    });
   }
   renderDatabaseCard(parent, connectedPath, loadError) {
     const settings = this.options.getSettings();
@@ -2051,7 +2371,9 @@ ${message}`, 8e3);
       status: "loading",
       models: [],
       endpoint: "",
-      error: ""
+      error: "",
+      probeStatus: "idle",
+      probeError: ""
     };
     this.providerModelStates.set(key, state);
     if (rerender) this.options.rerender();
@@ -2066,7 +2388,9 @@ ${message}`, 8e3);
         status: "loaded",
         models: response.models,
         endpoint: response.endpoint,
-        error: ""
+        error: "",
+        probeStatus: "idle",
+        probeError: ""
       });
       this.options.rerender();
     }).catch((error) => {
@@ -2076,7 +2400,9 @@ ${message}`, 8e3);
         status: "error",
         models: [],
         endpoint: provider.baseUrl ?? "",
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        probeStatus: "idle",
+        probeError: ""
       });
       this.options.rerender();
     });
@@ -2129,12 +2455,7 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
     const introMark = intro.createDiv({ cls: "video-memo-settings-mark" });
     (0, import_obsidian4.setIcon)(introMark, "video");
     const introCopy = intro.createDiv({ cls: "video-memo-settings-intro-copy" });
-    introCopy.createDiv({ cls: "video-memo-settings-kicker", text: "\u5DE5\u4F5C\u533A\u8BBE\u7F6E" });
     introCopy.createEl("h2", { text: "VideoMemo" });
-    introCopy.createDiv({
-      cls: "video-memo-settings-description",
-      text: "\u8FD0\u884C\u73AF\u5883 \xB7 \u8F93\u51FA \xB7 \u4F9B\u5E94\u5546"
-    });
     const openProviders = () => {
       this.page = "providers";
       this.providerView.showProviderList();
@@ -2556,7 +2877,7 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     const engineEnv = { ...process.env, PYTHONUTF8: "1" };
     let selectedModel = this.settings.model.trim();
     let providerBaseUrl = "";
-    let providerLabel = selectedModel ? `\u73AF\u5883\u914D\u7F6E \xB7 ${selectedModel}` : "\u73AF\u5883\u914D\u7F6E";
+    let providerLabel = "\u4F9B\u5E94\u5546\u914D\u7F6E";
     this.activeProviderSecret = "";
     try {
       if (this.settings.providerSource === "ccswitch") {
@@ -2575,10 +2896,12 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
         engineEnv.LLM_API_FORMAT = runtime.apiFormat || "chat_completions";
         if (!selectedModel) delete engineEnv.LLM_MODEL;
       } else if (this.settings.providerSource === "custom") {
-        const name = this.settings.customProviderName.trim();
-        const apiKey = this.settings.customProviderApiKey.trim();
-        selectedModel = this.settings.customProviderModel.trim();
-        providerBaseUrl = normalizeOpenAiBaseUrl(this.settings.customProviderBaseUrl);
+        const provider = activeCustomProvider(this.settings);
+        if (!provider) throw new Error("\u8BF7\u5148\u6DFB\u52A0\u5E76\u9009\u62E9\u4E00\u4E2A\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546");
+        const name = provider.name.trim();
+        const apiKey = provider.apiKey.trim();
+        selectedModel = provider.model.trim();
+        providerBaseUrl = normalizeOpenAiBaseUrl(provider.baseUrl);
         if (!name) throw new Error("\u8BF7\u586B\u5199\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u540D\u79F0");
         if (!apiKey) throw new Error("\u8BF7\u586B\u5199\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546 API Key");
         if (!selectedModel) throw new Error("\u8BF7\u9009\u62E9\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u6A21\u578B");
@@ -2586,7 +2909,7 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
         this.activeProviderSecret = apiKey;
         engineEnv.LLM_API_KEY = apiKey;
         engineEnv.LLM_BASE_URL = providerBaseUrl;
-        engineEnv.LLM_API_FORMAT = this.settings.customProviderApiFormat;
+        engineEnv.LLM_API_FORMAT = provider.apiFormat;
         delete engineEnv.LLM_MODEL;
       }
     } catch (error) {

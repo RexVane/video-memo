@@ -57,7 +57,10 @@ parse HLS/DASH manifests or handle browser Cookie sessions.
 
 ## Secrets and local data
 
-Provider keys are injected into the child process environment and are not
-written to plugin data. `.env`, browser cookies, downloaded media, Whisper
-weights, generated output, and Vault content are local data and must not enter
-Git history or CI artifacts.
+cc-switch provider keys are read only from the cc-switch database. Custom
+provider keys are persisted in the Vault plugin data file
+(`.obsidian/plugins/video-memo/data.json`) by explicit user choice. Either way,
+keys are injected into the Python child process environment and are never placed
+in command-line arguments, logs, or output files. `.env`, browser cookies,
+downloaded media, Whisper weights, generated output, and Vault content are local
+data and must not enter Git history or CI artifacts.

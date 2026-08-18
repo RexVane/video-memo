@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -308,6 +309,210 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(title, "短标题")
         self.assertTrue(body.startswith("## section"))
         self.assertNotIn("<<<TITLE>>>", body)
+
+    def test_uses_anthropic_messages_aliases(self) -> None:
+        for value in ("anthropic_messages", "anthropic", "messages", "anthropic-messages"):
+            with patch.dict(os.environ, {"LLM_API_FORMAT": value}):
+                self.assertTrue(summarize._uses_anthropic_messages())
+
+    def test_anthropic_messages_url(self) -> None:
+        self.assertEqual(
+            summarize._anthropic_messages_url("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1/messages",
+        )
+        self.assertEqual(
+            summarize._anthropic_messages_url("https://api.anthropic.com/v1/"),
+            "https://api.anthropic.com/v1/messages",
+        )
+        self.assertEqual(
+            summarize._anthropic_messages_url("https://api.anthropic.com"),
+            "https://api.anthropic.com/v1/messages",
+        )
+        self.assertEqual(
+            summarize._anthropic_messages_url("https://proxy.example.test/x/v1"),
+            "https://proxy.example.test/x/v1/messages",
+        )
+
+    def test_anthropic_content_blocks_converts_text_and_image(self) -> None:
+        blocks = summarize._anthropic_content_blocks("plain text")
+        self.assertEqual(blocks, [{"type": "text", "text": "plain text"}])
+
+        content = [
+            {"type": "text", "text": "hello"},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": "data:image/jpeg;base64,AAAA",
+                    "detail": "high",
+                },
+            },
+        ]
+        converted = summarize._anthropic_content_blocks(content)
+        self.assertEqual(converted[0], {"type": "text", "text": "hello"})
+        self.assertEqual(
+            converted[1],
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/jpeg",
+                    "data": "AAAA",
+                },
+            },
+        )
+
+    def test_anthropic_content_blocks_rejects_non_data_uri(self) -> None:
+        content = [{"type": "image_url", "image_url": {"url": "https://example.test/x.jpg"}}]
+        with self.assertRaisesRegex(ValueError, "base64 data URI"):
+            summarize._anthropic_content_blocks(content)
+
+    def test_anthropic_completion_sends_messages_request(self) -> None:
+        client = httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "content": [{"type": "text", "text": "pong"}],
+                },
+            )
+        ))
+        config = SimpleNamespace(api_key="secret-key", base_url="https://api.anthropic.com/v1")
+        result = summarize._anthropic_completion(
+            client,
+            config,
+            model="claude-sonnet",
+            messages=[
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "ping"},
+            ],
+            max_tokens=16,
+        )
+        self.assertEqual(result, "pong")
+
+    def test_anthropic_completion_sends_x_api_key_header(self) -> None:
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["headers"] = dict(request.headers)
+            captured["body"] = request.content
+            return httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]})
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        config = SimpleNamespace(api_key="secret-key", base_url="https://api.anthropic.com/v1")
+        summarize._anthropic_completion(
+            client,
+            config,
+            model="claude-sonnet",
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=8,
+        )
+        self.assertEqual(captured["url"], "https://api.anthropic.com/v1/messages")
+        self.assertEqual(captured["headers"]["x-api-key"], "secret-key")
+        self.assertEqual(captured["headers"]["anthropic-version"], "2023-06-01")
+        self.assertNotIn("authorization", {k.lower() for k in captured["headers"]})
+        body = json.loads(captured["body"])
+        self.assertEqual(body["model"], "claude-sonnet")
+        self.assertEqual(body["max_tokens"], 8)
+        self.assertEqual(body["messages"][0]["role"], "user")
+
+    def test_anthropic_completion_extracts_text_blocks_and_ignores_others(self) -> None:
+        client = httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={
+                    "content": [
+                        {"type": "text", "text": "first"},
+                        {"type": "tool_use", "id": "x"},
+                        {"type": "text", "text": "second"},
+                    ],
+                },
+            )
+        ))
+        config = SimpleNamespace(api_key="k", base_url="https://api.anthropic.com/v1")
+        result = summarize._anthropic_completion(
+            client,
+            config,
+            model="m",
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        self.assertEqual(result, "first\nsecond")
+
+    def test_anthropic_completion_raises_on_http_error_with_detail(self) -> None:
+        client = httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                403,
+                json={"error": {"type": "forbidden_error", "message": "This account only allows Codex official clients"}},
+            )
+        ))
+        config = SimpleNamespace(api_key="k", base_url="https://api.anthropic.com/v1")
+        with self.assertRaises(summarize._AnthropicHttpError) as ctx:
+            summarize._anthropic_completion(
+                client,
+                config,
+                model="m",
+                messages=[{"role": "user", "content": "ping"}],
+            )
+        self.assertEqual(ctx.exception.status_code, 403)
+        self.assertIn("Codex", ctx.exception.detail)
+
+    def test_anthropic_chat_completion_retries_transient_then_succeeds(self) -> None:
+        responses = [
+            httpx.Response(503, json={"error": {"message": "busy"}}),
+            httpx.Response(429, json={"error": {"message": "rate"}}),
+            httpx.Response(200, json={"content": [{"type": "text", "text": "ok"}]}),
+        ]
+        client = httpx.Client(transport=httpx.MockTransport(lambda request: responses.pop(0)))
+        config = SimpleNamespace(api_key="k", base_url="https://api.anthropic.com/v1")
+        with patch.object(summarize, "RETRY_DELAYS", (0.0,)):
+            result = summarize._anthropic_chat_completion(
+                client,
+                config,
+                model="m",
+                messages=[{"role": "user", "content": "ping"}],
+            )
+        self.assertEqual(result, "ok")
+
+    def test_anthropic_chat_completion_maps_rate_limit(self) -> None:
+        client = httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(429, json={"error": {"message": "rate"}})
+        ))
+        config = SimpleNamespace(api_key="k", base_url="https://api.anthropic.com/v1")
+        with patch.object(summarize, "RETRY_DELAYS", (0.0,)):
+            with self.assertRaisesRegex(RuntimeError, "速率限制"):
+                summarize._anthropic_chat_completion(
+                    client,
+                    config,
+                    model="m",
+                    messages=[{"role": "user", "content": "ping"}],
+                )
+
+    def test_anthropic_chat_completion_does_not_retry_401(self) -> None:
+        client = httpx.Client(transport=httpx.MockTransport(
+            lambda request: httpx.Response(401, json={"error": {"message": "invalid x-api-key"}})
+        ))
+        config = SimpleNamespace(api_key="k", base_url="https://api.anthropic.com/v1")
+        with self.assertRaisesRegex(RuntimeError, "认证失败"):
+            summarize._anthropic_chat_completion(
+                client,
+                config,
+                model="m",
+                messages=[{"role": "user", "content": "ping"}],
+            )
+
+    def test_anthropic_chat_completion_retries_connection_errors(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("boom", request=request)
+
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        config = SimpleNamespace(api_key="k", base_url="https://api.anthropic.com/v1")
+        with patch.object(summarize, "RETRY_DELAYS", (0.0,)):
+            with self.assertRaisesRegex(RuntimeError, "无法连接"):
+                summarize._anthropic_chat_completion(
+                    client,
+                    config,
+                    model="m",
+                    messages=[{"role": "user", "content": "ping"}],
+                )
 
 if __name__ == "__main__":
     unittest.main()

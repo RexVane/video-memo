@@ -40,12 +40,7 @@ export class VideoMemoSettingTab extends PluginSettingTab {
     const introMark = intro.createDiv({ cls: "video-memo-settings-mark" });
     setIcon(introMark, "video");
     const introCopy = intro.createDiv({ cls: "video-memo-settings-intro-copy" });
-    introCopy.createDiv({ cls: "video-memo-settings-kicker", text: "工作区设置" });
     introCopy.createEl("h2", { text: "VideoMemo" });
-    introCopy.createDiv({
-      cls: "video-memo-settings-description",
-      text: "运行环境 · 输出 · 供应商",
-    });
 
     const openProviders = (): void => {
       this.page = "providers";

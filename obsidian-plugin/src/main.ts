@@ -13,6 +13,7 @@ import {
 import { normalizeOpenAiBaseUrl, resolveCcSwitchProviderRuntime } from "./ccswitch";
 import { RunProgressModal, type TaskState } from "./run-progress";
 import {
+  activeCustomProvider,
   DEFAULT_SETTINGS,
   describeProviderSelection,
   normalizeSettings,
@@ -204,7 +205,7 @@ export default class VideoMemoPlugin extends Plugin {
     const engineEnv: NodeJS.ProcessEnv = { ...process.env, PYTHONUTF8: "1" };
     let selectedModel = this.settings.model.trim();
     let providerBaseUrl = "";
-    let providerLabel = selectedModel ? `环境配置 · ${selectedModel}` : "环境配置";
+    let providerLabel = "供应商配置";
     this.activeProviderSecret = "";
     try {
       if (this.settings.providerSource === "ccswitch") {
@@ -225,10 +226,12 @@ export default class VideoMemoPlugin extends Plugin {
         engineEnv.LLM_API_FORMAT = runtime.apiFormat || "chat_completions";
         if (!selectedModel) delete engineEnv.LLM_MODEL;
       } else if (this.settings.providerSource === "custom") {
-        const name = this.settings.customProviderName.trim();
-        const apiKey = this.settings.customProviderApiKey.trim();
-        selectedModel = this.settings.customProviderModel.trim();
-        providerBaseUrl = normalizeOpenAiBaseUrl(this.settings.customProviderBaseUrl);
+        const provider = activeCustomProvider(this.settings);
+        if (!provider) throw new Error("请先添加并选择一个自定义供应商");
+        const name = provider.name.trim();
+        const apiKey = provider.apiKey.trim();
+        selectedModel = provider.model.trim();
+        providerBaseUrl = normalizeOpenAiBaseUrl(provider.baseUrl);
         if (!name) throw new Error("请填写自定义供应商名称");
         if (!apiKey) throw new Error("请填写自定义供应商 API Key");
         if (!selectedModel) throw new Error("请选择自定义供应商模型");
@@ -236,7 +239,7 @@ export default class VideoMemoPlugin extends Plugin {
         this.activeProviderSecret = apiKey;
         engineEnv.LLM_API_KEY = apiKey;
         engineEnv.LLM_BASE_URL = providerBaseUrl;
-        engineEnv.LLM_API_FORMAT = this.settings.customProviderApiFormat;
+        engineEnv.LLM_API_FORMAT = provider.apiFormat;
         delete engineEnv.LLM_MODEL;
       }
     } catch (error) {

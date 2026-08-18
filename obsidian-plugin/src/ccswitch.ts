@@ -73,6 +73,33 @@ export interface CcSwitchModelListResponse extends OpenAiCompatibleModelsRespons
 export interface OpenAiCompatibleModelsOptions {
   baseUrl: string;
   apiKey: string;
+  apiFormat?: OpenAiApiFormat;
+}
+
+export type OpenAiApiFormat = "anthropic_messages" | "chat_completions" | "responses";
+
+export function normalizeApiFormat(value: unknown): OpenAiApiFormat {
+  if (typeof value !== "string") return "chat_completions";
+  const normalized = value.trim().toLowerCase().replace("-", "_");
+  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
+    return "anthropic_messages";
+  }
+  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
+    return "responses";
+  }
+  return "chat_completions";
+}
+
+export interface OpenAiModelProbeOptions {
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  apiFormat: OpenAiApiFormat;
+}
+
+export interface OpenAiModelProbeResult {
+  endpoint: string;
+  model: string;
 }
 
 interface ProviderRow extends Record<string, unknown> {
@@ -427,8 +454,8 @@ export function normalizeOpenAiBaseUrl(baseUrl: string): string {
   }
 
   const path = url.pathname.replace(/\/+$/, "");
-  if (/\/(?:chat\/completions|responses)$/i.test(path)) {
-    throw new Error("模型接口 Base URL 不能以 /chat/completions 或 /responses 结尾");
+  if (/\/(?:chat\/completions|responses|messages)$/i.test(path)) {
+    throw new Error("模型接口 Base URL 不能以 /chat/completions、/responses 或 /messages 结尾");
   }
   url.pathname = path || "/";
   return url.toString();
@@ -481,16 +508,21 @@ export async function fetchOpenAiCompatibleModels(
   options: OpenAiCompatibleModelsOptions,
 ): Promise<OpenAiCompatibleModelsResponse> {
   const endpoint = openAiModelsUrl(options.baseUrl);
+  const isAnthropic = normalizeApiFormat(options.apiFormat) === "anthropic_messages";
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (isAnthropic) {
+    headers["x-api-key"] = options.apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers.Authorization = `Bearer ${options.apiKey}`;
+  }
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     const response = await Promise.race([
       requestUrl({
         url: endpoint,
         method: "GET",
-        headers: {
-          Accept: "application/json",
-          Authorization: `Bearer ${options.apiKey}`,
-        },
+        headers,
         throw: false,
       }),
       new Promise<never>((_, reject) => {
@@ -499,11 +531,13 @@ export async function fetchOpenAiCompatibleModels(
     ]);
     if (response.status < 200 || response.status >= 300) {
       const label =
-        response.status === 401 || response.status === 403
+        response.status === 401
           ? "模型接口鉴权失败"
-          : response.status === 404
-            ? "未找到模型接口"
-            : "模型接口请求失败";
+          : response.status === 403
+            ? "模型接口请求被拒绝"
+            : response.status === 404
+              ? "未找到模型接口"
+              : "模型接口请求失败";
       const detail = responseErrorDetail(response.text);
       throw new Error(`${label} (HTTP ${response.status})${detail ? `：${detail}` : ""}`);
     }
@@ -542,4 +576,83 @@ export async function fetchCcSwitchProviderModels(options: {
     baseUrl: runtime.baseUrl,
     apiKey: runtime.apiKey,
   });
+}
+
+function openAiEndpointUrl(baseUrl: string, suffix: string): string {
+  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
+  const path = url.pathname.replace(/\/+$/, "");
+  url.pathname = path ? `${path}/${suffix}` : `v1/${suffix}`;
+  return url.toString();
+}
+
+function httpStatusLabel(status: number): string {
+  if (status === 401) return "鉴权失败";
+  if (status === 403) return "请求被拒绝";
+  if (status === 404) return "模型或接口不存在";
+  if (status === 429) return "请求频率超限";
+  if (status >= 500) return "服务端不可用";
+  return "请求失败";
+}
+
+export async function probeOpenAiCompatibleModel(
+  options: OpenAiModelProbeOptions,
+): Promise<OpenAiModelProbeResult> {
+  const format = normalizeApiFormat(options.apiFormat);
+  const isAnthropic = format === "anthropic_messages";
+  const isResponses = format === "responses";
+  const endpoint = openAiEndpointUrl(
+    options.baseUrl,
+    isAnthropic ? "messages" : isResponses ? "responses" : "chat/completions",
+  );
+  const body = isAnthropic
+    ? {
+        model: options.model,
+        max_tokens: 8,
+        messages: [{ role: "user", content: "ping" }],
+      }
+    : isResponses
+      ? { model: options.model, input: "ping" }
+      : {
+          model: options.model,
+          messages: [{ role: "user", content: "ping" }],
+          max_tokens: 8,
+        };
+
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+  if (isAnthropic) {
+    headers["x-api-key"] = options.apiKey;
+    headers["anthropic-version"] = "2023-06-01";
+  } else {
+    headers.Authorization = `Bearer ${options.apiKey}`;
+  }
+
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const response = await Promise.race([
+      requestUrl({
+        url: endpoint,
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+        throw: false,
+      }),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error("模型请求超时（30 秒）")), 30_000);
+      }),
+    ]);
+    if (response.status < 200 || response.status >= 300) {
+      const detail = responseErrorDetail(response.text);
+      const label = httpStatusLabel(response.status);
+      throw new Error(`${label} (HTTP ${response.status})${detail ? `：${detail}` : ""}`);
+    }
+    return { endpoint, model: options.model };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(message.replaceAll(options.apiKey, "***"));
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }

@@ -6,11 +6,21 @@ import {
   fetchOpenAiCompatibleModels,
   loadCcSwitchProviders,
   normalizeOpenAiBaseUrl,
+  probeOpenAiCompatibleModel,
   type CcSwitchProvider,
 } from "./ccswitch";
 
-export type ProviderSource = "ccswitch" | "environment" | "custom";
-export type CustomProviderApiFormat = "chat_completions" | "responses";
+export type ProviderSource = "ccswitch" | "custom";
+export type CustomProviderApiFormat = "anthropic_messages" | "chat_completions" | "responses";
+
+export interface CustomProviderConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  apiFormat: CustomProviderApiFormat;
+}
 
 export interface CcSwitchUiSettings {
   providerSource: ProviderSource;
@@ -19,12 +29,10 @@ export interface CcSwitchUiSettings {
   ccSwitchFollowCurrent: boolean;
   ccSwitchProviderId: string;
   model: string;
-  customProviderName: string;
-  customProviderBaseUrl: string;
-  customProviderApiKey: string;
-  customProviderModel: string;
-  customProviderApiFormat: CustomProviderApiFormat;
+  customProviders: CustomProviderConfig[];
+  activeCustomProviderId: string;
 }
+
 
 interface ViewOptions {
   app: App;
@@ -40,9 +48,12 @@ interface ProviderModelState {
   models: string[];
   endpoint: string;
   error: string;
+  probeStatus: "idle" | "probing" | "probed" | "probe_error";
+  probeError: string;
 }
 
 interface CustomProviderDraft {
+  id: string | null;
   name: string;
   baseUrl: string;
   apiKey: string;
@@ -111,7 +122,7 @@ export class CcSwitchProviderSettingsView {
   private configTab: "parsed" | "raw" = "parsed";
   private rawDetailExpanded = false;
   private readonly providerModelStates = new Map<string, ProviderModelState>();
-  private customModelState: ProviderModelState | null = null;
+  private readonly customModelStates = new Map<string, ProviderModelState>();
   private customDraft: CustomProviderDraft | null = null;
   private modelRequestId = 0;
 
@@ -123,9 +134,21 @@ export class CcSwitchProviderSettingsView {
     this.selectedProviderId = "";
     this.visibleSource = null;
     this.customDraft = null;
-    this.customModelState = null;
+    this.customModelStates.clear();
     this.configTab = "parsed";
     this.rawDetailExpanded = false;
+  }
+
+  private customModelStateKey(draftId: string | null): string {
+    return draftId ?? "__new_custom_provider__";
+  }
+
+  private customModelStateFor(draftId: string | null): ProviderModelState | null {
+    return this.customModelStates.get(this.customModelStateKey(draftId)) ?? null;
+  }
+
+  private setCustomModelState(draftId: string | null, state: ProviderModelState): void {
+    this.customModelStates.set(this.customModelStateKey(draftId), state);
   }
 
   render(parent: HTMLElement): boolean {
@@ -173,23 +196,15 @@ export class CcSwitchProviderSettingsView {
     const heading = section.createDiv({ cls: "ccswitch-heading" });
     const headingCopy = heading.createDiv();
     headingCopy.createEl("h2", { text: "供应商" });
-    headingCopy.createEl("p", {
-      text: "选择 cc-switch、项目环境配置，或添加 OpenAI-compatible 自定义供应商。",
-    });
     const sourceSwitch = heading.createDiv({
       cls: "ccswitch-source-switch",
       attr: { "aria-label": "供应商配置来源" },
     });
     this.renderSourceButton(sourceSwitch, "cc-switch", "database", "ccswitch", source);
-    this.renderSourceButton(sourceSwitch, "环境配置", "file-cog", "environment", source);
     this.renderSourceButton(sourceSwitch, "自定义", "sliders-horizontal", "custom", source);
 
     if (source === "custom") {
       this.renderCustomProvider(section, settings);
-      return false;
-    }
-    if (source === "environment") {
-      this.renderEnvironmentSource(section, settings);
       return false;
     }
 
@@ -269,8 +284,10 @@ export class CcSwitchProviderSettingsView {
       this.selectedProviderId = "";
       this.visibleSource = source;
       if (source === "custom") {
-        this.customDraft = this.customDraft ?? this.customDraftFromSettings();
-        this.options.rerender();
+        this.customDraft = null;
+        void this.options.updateSettings({ providerSource: "custom" }).then(() => {
+          this.options.rerender();
+        });
         return;
       }
       void this.options.updateSettings({ providerSource: source }).then(() => {
@@ -281,75 +298,170 @@ export class CcSwitchProviderSettingsView {
 
   private customDraftFromSettings(): CustomProviderDraft {
     const settings = this.options.getSettings();
+    const active =
+      settings.customProviders.find((p) => p.id === settings.activeCustomProviderId) ??
+      settings.customProviders[0];
+    if (active) {
+      return {
+        id: active.id,
+        name: active.name,
+        baseUrl: active.baseUrl,
+        apiKey: active.apiKey,
+        model: active.model,
+        apiFormat: active.apiFormat,
+      };
+    }
     return {
-      name: settings.customProviderName,
-      baseUrl: settings.customProviderBaseUrl,
-      apiKey: settings.customProviderApiKey,
-      model: settings.customProviderModel,
-      apiFormat: settings.customProviderApiFormat,
+      id: null,
+      name: "",
+      baseUrl: "",
+      apiKey: "",
+      model: "",
+      apiFormat: "chat_completions",
     };
   }
 
-  private renderEnvironmentSource(parent: HTMLElement, settings: CcSwitchUiSettings): void {
-    const card = parent.createDiv({ cls: "ccswitch-custom-card" });
-    const title = card.createDiv({ cls: "ccswitch-section-title" });
-    icon(title, "file-cog");
-    title.createSpan({ text: "项目环境配置" });
-    card.createDiv({
-      cls: "ccswitch-custom-hint",
-      text: "使用项目 .env、系统环境变量或 ~/.grok/config.toml 中的 API 配置。",
-    });
-    const form = card.createDiv({ cls: "ccswitch-custom-form" });
-    this.renderCustomTextField(form, {
-      label: "模型覆盖（可选）",
-      value: settings.model,
-      placeholder: "留空时使用环境配置中的模型",
-      onInput: (value) => {
-        void this.options.updateSettings({ model: value.trim() });
-      },
-    });
-    const actions = card.createDiv({ cls: "ccswitch-custom-action-row" });
-    actionButton(actions, {
-      label: settings.providerSource === "environment" ? "正在使用" : "使用环境配置",
-      icon: settings.providerSource === "environment" ? "check" : "play",
-      primary: settings.providerSource !== "environment",
-      disabled: settings.providerSource === "environment",
-      onClick: () => {
-        void this.options.updateSettings({ providerSource: "environment" }).then(() => {
-          this.options.rerender();
-        });
-      },
-    });
-  }
-
   private renderCustomProvider(parent: HTMLElement, settings: CcSwitchUiSettings): void {
-    const draft = (this.customDraft ??= this.customDraftFromSettings());
     const card = parent.createDiv({ cls: "ccswitch-custom-card" });
     const heading = card.createDiv({ cls: "ccswitch-custom-heading" });
     const title = heading.createDiv({ cls: "ccswitch-section-title" });
     icon(title, "sliders-horizontal");
-    title.createSpan({ text: "OpenAI-compatible 自定义供应商" });
-    if (settings.providerSource === "custom") badge(heading, "使用中", "accent");
-    card.createDiv({
-      cls: "ccswitch-custom-hint",
-      text: "填写 API 根地址（例如 https://example.com/v1），不要填写 /chat/completions。",
+    title.createSpan({ text: "自定义供应商" });
+    actionButton(heading, {
+      label: "添加供应商",
+      icon: "plus",
+      onClick: () => {
+        this.customModelStates.delete(this.customModelStateKey(null));
+        this.customDraft = {
+          id: null,
+          name: "",
+          baseUrl: "",
+          apiKey: "",
+          model: "",
+          apiFormat: "chat_completions",
+        };
+        this.options.rerender();
+      },
     });
 
-    const form = card.createDiv({ cls: "ccswitch-custom-form" });
+    // Provider list
+    const providers = settings.customProviders;
+    if (providers.length > 0) {
+      const list = card.createDiv({ cls: "ccswitch-custom-provider-list" });
+      for (const provider of providers) {
+        this.renderCustomProviderRow(list, provider, settings);
+      }
+    }
+
+    // Edit form (draft)
+    const draft = this.customDraft ?? this.customDraftFromSettings();
+    this.renderCustomProviderForm(card, draft, settings);
+  }
+
+  private renderCustomProviderRow(
+    parent: HTMLElement,
+    provider: CustomProviderConfig,
+    settings: CcSwitchUiSettings,
+  ): void {
+    const row = parent.createDiv({ cls: "ccswitch-custom-provider-entry" });
+    const isActive =
+      settings.providerSource === "custom" &&
+      settings.activeCustomProviderId === provider.id;
+    const copy = row.createDiv({ cls: "ccswitch-custom-provider-entry-copy" });
+    copy.createDiv({
+      cls: "ccswitch-custom-provider-entry-name",
+      text: provider.name.trim() || "未命名供应商",
+    });
+    const subtitle = provider.model.trim() || "尚未选择模型";
+    const formatLabel =
+      provider.apiFormat === "anthropic_messages"
+        ? "Anthropic"
+        : provider.apiFormat === "responses"
+          ? "Responses"
+          : "Chat";
+    copy.createDiv({
+      cls: "ccswitch-custom-provider-entry-sub",
+      text: `${subtitle} · ${formatLabel}`,
+    });
+    if (isActive) badge(row, "使用中", "accent");
+    const trailing = row.createDiv({ cls: "ccswitch-custom-provider-entry-actions" });
+    actionButton(trailing, {
+      label: isActive ? "使用中" : "使用",
+      icon: isActive ? "check" : "play",
+      primary: !isActive,
+      disabled: isActive,
+      onClick: () => this.activateExistingProvider(provider.id),
+    });
+    actionButton(trailing, {
+      label: "编辑",
+      icon: "pencil",
+      onClick: () => {
+        this.customDraft = {
+          id: provider.id,
+          name: provider.name,
+          baseUrl: provider.baseUrl,
+          apiKey: provider.apiKey,
+          model: provider.model,
+          apiFormat: provider.apiFormat,
+        };
+        this.options.rerender();
+      },
+    });
+    actionButton(trailing, {
+      label: "删除",
+      icon: "trash-2",
+      onClick: () => this.deleteCustomProvider(provider.id),
+    });
+    row.addEventListener("click", (event) => {
+      if ((event.target as HTMLElement).closest("button")) return;
+      this.customDraft = {
+        id: provider.id,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: provider.model,
+        apiFormat: provider.apiFormat,
+      };
+      this.options.rerender();
+    });
+  }
+
+  private renderCustomProviderForm(
+    parent: HTMLElement,
+    draft: CustomProviderDraft,
+    settings: CcSwitchUiSettings,
+  ): void {
+    const form = parent.createDiv({ cls: "ccswitch-custom-form" });
+    const formTitle = form.createDiv({ cls: "ccswitch-custom-form-title" });
+    formTitle.createSpan({
+      text: draft.id ? "编辑供应商" : "新供应商",
+    });
+
+    const modelState = this.customModelStateFor(draft.id);
     const status = form.createDiv({
       cls: `ccswitch-custom-status${
-        this.customModelState?.status === "loaded"
+        modelState?.status === "loaded"
           ? " is-success"
-          : this.customModelState?.status === "error"
+          : modelState?.status === "error"
             ? " is-error"
             : ""
       }`,
-      text: this.customStatusText(),
+      text: this.customStatusText(draft.id),
     });
+    let discoveredModelSelect: HTMLSelectElement | null = null;
     const invalidateTest = (): void => {
-      this.customModelState = null;
+      this.customModelStates.delete(this.customModelStateKey(draft.id));
       status.className = "ccswitch-custom-status is-warning";
       status.setText("配置已更改，请重新测试连接");
+      if (discoveredModelSelect) {
+        discoveredModelSelect.empty();
+        discoveredModelSelect.createEl("option", {
+          value: "",
+          text: "刷新后可选择模型",
+        });
+        discoveredModelSelect.value = "";
+        discoveredModelSelect.disabled = true;
+      }
     };
 
     this.renderCustomTextField(form, {
@@ -415,6 +527,7 @@ export class CcSwitchProviderSettingsView {
       cls: "dropdown ccswitch-custom-select",
       attr: { "aria-label": "选择 API 格式" },
     });
+    formatSelect.createEl("option", { value: "anthropic_messages", text: "Anthropic Messages" });
     formatSelect.createEl("option", { value: "chat_completions", text: "Chat Completions" });
     formatSelect.createEl("option", { value: "responses", text: "Responses API" });
     formatSelect.value = draft.apiFormat;
@@ -426,25 +539,43 @@ export class CcSwitchProviderSettingsView {
     const modelField = form.createDiv({ cls: "ccswitch-custom-field" });
     modelField.createEl("label", { text: "模型" });
     const modelRow = modelField.createDiv({ cls: "ccswitch-custom-model-controls" });
+    const models = modelState?.status === "loaded" ? modelState.models : [];
+    const modelSelect = modelRow.createEl("select", {
+      cls: "dropdown ccswitch-custom-model-select",
+      attr: { "aria-label": "选择已发现模型" },
+    });
+    discoveredModelSelect = modelSelect;
+    modelSelect.createEl("option", {
+      value: "",
+      text: models.length > 0 ? "选择已发现模型…" : "刷新后可选择模型",
+    });
+    for (const model of models) {
+      modelSelect.createEl("option", { value: model, text: model });
+    }
+    modelSelect.disabled = models.length === 0;
+    modelSelect.value = models.includes(draft.model) ? draft.model : "";
+
     const modelInput = modelRow.createEl("input", {
+      cls: "ccswitch-custom-model-input",
       attr: {
         type: "text",
         value: draft.model,
-        placeholder: "选择或输入模型名称",
-        list: "video-memo-custom-models",
-        "aria-label": "自定义供应商模型",
+        placeholder: "也可手动输入模型名称",
+        "aria-label": "手动输入自定义供应商模型",
       },
     });
-    const modelList = modelRow.createEl("datalist", { attr: { id: "video-memo-custom-models" } });
-    for (const model of this.customModelState?.models ?? []) {
-      modelList.createEl("option", { value: model });
-    }
+    modelSelect.addEventListener("change", () => {
+      if (!modelSelect.value) return;
+      draft.model = modelSelect.value;
+      modelInput.value = modelSelect.value;
+    });
     modelInput.addEventListener("input", () => {
       draft.model = modelInput.value;
+      modelSelect.value = models.includes(modelInput.value) ? modelInput.value : "";
     });
 
-    const actions = card.createDiv({ cls: "ccswitch-custom-action-row" });
-    const loading = this.customModelState?.status === "loading";
+    const actions = form.createDiv({ cls: "ccswitch-custom-action-row" });
+    const loading = modelState?.status === "loading";
     actionButton(actions, {
       label: loading ? "连接中..." : "刷新模型",
       icon: loading ? "loader-circle" : "refresh-cw",
@@ -458,10 +589,10 @@ export class CcSwitchProviderSettingsView {
       onClick: () => this.startCustomModelRequest(true),
     });
     actionButton(actions, {
-      label: settings.providerSource === "custom" ? "保存并继续使用" : "使用此配置",
+      label: draft.id ? "保存并使用" : "添加并使用",
       icon: "check",
       primary: true,
-      onClick: () => this.activateCustomProvider(),
+      onClick: () => this.saveCustomProvider(),
     });
   }
 
@@ -492,71 +623,135 @@ export class CcSwitchProviderSettingsView {
     }
   }
 
-  private customStatusText(): string {
-    const state = this.customModelState;
+  private customStatusText(draftId: string | null): string {
+    const state = this.customModelStateFor(draftId);
     if (!state) return "尚未测试连接";
-    if (state.status === "loading") return "正在验证 URL、Key 并获取模型列表...";
-    if (state.status === "error") return `连接失败：${state.error}`;
-    return `连接成功：发现 ${state.models.length} 个模型`;
+    if (state.status === "loading") return "正在获取模型列表...";
+    if (state.status === "error") return `模型列表获取失败：${state.error}`;
+    if (state.probeStatus === "probing") return "正在发送真实模型请求...";
+    if (state.probeStatus === "probe_error") return `模型调用失败：${state.probeError}`;
+    if (state.probeStatus === "probed") return `模型调用成功：发现 ${state.models.length} 个模型，模型可正常调用`;
+    return `模型接口可用：发现 ${state.models.length} 个模型（未测试模型调用）`;
   }
 
   private startCustomModelRequest(showNotice: boolean): void {
     const draft = (this.customDraft ??= this.customDraftFromSettings());
+    const draftId = draft.id;
     if (!draft.baseUrl.trim() || !draft.apiKey.trim()) {
       const message = "请先填写 API Base URL 和 API Key";
-      this.customModelState = {
+      this.setCustomModelState(draftId, {
         requestId: ++this.modelRequestId,
         status: "error",
         models: [],
         endpoint: "",
         error: message,
-      };
+        probeStatus: "idle",
+        probeError: "",
+      });
       if (showNotice) new Notice(message);
       this.options.rerender();
       return;
     }
     const requestId = ++this.modelRequestId;
-    this.customModelState = {
+    this.setCustomModelState(draftId, {
       requestId,
       status: "loading",
       models: [],
       endpoint: "",
       error: "",
-    };
+      probeStatus: "idle",
+      probeError: "",
+    });
     this.options.rerender();
     void fetchOpenAiCompatibleModels({
       baseUrl: draft.baseUrl,
       apiKey: draft.apiKey,
+      apiFormat: draft.apiFormat,
     })
       .then((response) => {
-        if (this.customModelState?.requestId !== requestId) return;
-        this.customModelState = {
+        const current = this.customModelStateFor(draftId);
+        if (current?.requestId !== requestId) return;
+        this.setCustomModelState(draftId, {
           requestId,
           status: "loaded",
           models: response.models,
           endpoint: response.endpoint,
           error: "",
-        };
+          probeStatus: "idle",
+          probeError: "",
+        });
         if (!draft.model && response.models.length > 0) draft.model = response.models[0];
-        if (showNotice) new Notice(`连接成功，发现 ${response.models.length} 个模型`);
-        this.options.rerender();
+        if (showNotice) {
+          // Real model probe after model list success
+          this.probeModel(draft, requestId);
+        } else {
+          new Notice(`刷新成功，发现 ${response.models.length} 个模型`);
+          this.options.rerender();
+        }
       })
       .catch((error: unknown) => {
-        if (this.customModelState?.requestId !== requestId) return;
+        const current = this.customModelStateFor(draftId);
+        if (current?.requestId !== requestId) return;
         const message = error instanceof Error ? error.message : String(error);
-        this.customModelState = {
+        this.setCustomModelState(draftId, {
           requestId,
           status: "error",
           models: [],
           endpoint: "",
           error: message,
-        };
+          probeStatus: "idle",
+          probeError: "",
+        });
         if (showNotice) new Notice(`连接失败\n${message}`, 8000);
         this.options.rerender();
       });
   }
 
-  private activateCustomProvider(): void {
+  private probeModel(draft: CustomProviderDraft, listRequestId: number): void {
+    const draftId = draft.id;
+    const model = draft.model.trim();
+    if (!model) {
+      const current = this.customModelStateFor(draftId);
+      if (current?.requestId === listRequestId) {
+        this.setCustomModelState(draftId, {
+          ...current,
+          probeStatus: "probe_error",
+          probeError: "请先选择或输入模型名称",
+        });
+        new Notice("请先选择或输入模型名称", 8000);
+        this.options.rerender();
+      }
+      return;
+    }
+    const current = this.customModelStateFor(draftId);
+    if (current?.requestId === listRequestId) {
+      this.setCustomModelState(draftId, { ...current, probeStatus: "probing" });
+      this.options.rerender();
+    }
+    void probeOpenAiCompatibleModel({
+      baseUrl: draft.baseUrl,
+      apiKey: draft.apiKey,
+      model,
+      apiFormat: draft.apiFormat,
+    })
+      .then(() => {
+        const state = this.customModelStateFor(draftId);
+        if (state?.requestId !== listRequestId) return;
+        this.setCustomModelState(draftId, { ...state, probeStatus: "probed", probeError: "" });
+        new Notice(`连接成功，模型 ${model} 可正常调用`);
+        this.options.rerender();
+      })
+      .catch((error: unknown) => {
+        const state = this.customModelStateFor(draftId);
+        if (state?.requestId !== listRequestId) return;
+        const message = error instanceof Error ? error.message : String(error);
+        this.setCustomModelState(draftId, { ...state, probeStatus: "probe_error", probeError: message });
+        new Notice(`模型调用失败\n${message}`, 8000);
+        this.options.rerender();
+      });
+  }
+
+  private saveCustomProvider(): void {
     const draft = (this.customDraft ??= this.customDraftFromSettings());
     try {
       const name = draft.name.trim();
@@ -566,24 +761,81 @@ export class CcSwitchProviderSettingsView {
       if (!name) throw new Error("请填写供应商名称");
       if (!apiKey) throw new Error("请填写 API Key");
       if (!model) throw new Error("请选择或输入模型名称");
+
+      const settings = this.options.getSettings();
+      const isNew = draft.id === null;
+      const previousStateKey = this.customModelStateKey(draft.id);
+      let providers: CustomProviderConfig[];
+      let activeId: string;
+
+      if (draft.id) {
+        providers = settings.customProviders.map((p) =>
+          p.id === draft.id
+            ? { id: p.id, name, baseUrl, apiKey, model, apiFormat: draft.apiFormat }
+            : p,
+        );
+        activeId = draft.id;
+      } else {
+        const newId = `cp_${Date.now()}`;
+        providers = [
+          ...settings.customProviders,
+          { id: newId, name, baseUrl, apiKey, model, apiFormat: draft.apiFormat },
+        ];
+        activeId = newId;
+        draft.id = newId;
+        const pendingState = this.customModelStates.get(previousStateKey);
+        if (pendingState) {
+          this.customModelStates.set(newId, pendingState);
+          this.customModelStates.delete(previousStateKey);
+        }
+      }
+
       void this.options
         .updateSettings({
           providerSource: "custom",
-          customProviderName: name,
-          customProviderBaseUrl: baseUrl,
-          customProviderApiKey: apiKey,
-          customProviderModel: model,
-          customProviderApiFormat: draft.apiFormat,
+          customProviders: providers,
+          activeCustomProviderId: activeId,
         })
         .then(() => {
-          this.visibleSource = "custom";
           this.customDraft = this.customDraftFromSettings();
-          new Notice("已启用自定义供应商");
+          new Notice(isNew ? "已添加供应商" : "已保存供应商");
           this.options.rerender();
         });
     } catch (error) {
       new Notice(error instanceof Error ? error.message : String(error), 8000);
     }
+  }
+
+  private activateExistingProvider(providerId: string): void {
+    void this.options
+      .updateSettings({
+        providerSource: "custom",
+        activeCustomProviderId: providerId,
+      })
+      .then(() => {
+        new Notice("已切换供应商");
+        this.options.rerender();
+      });
+  }
+
+  private deleteCustomProvider(providerId: string): void {
+    const settings = this.options.getSettings();
+    const providers = settings.customProviders.filter((p) => p.id !== providerId);
+    let activeId = settings.activeCustomProviderId;
+    if (activeId === providerId) {
+      activeId = providers[0]?.id ?? "";
+    }
+    void this.options
+      .updateSettings({
+        customProviders: providers,
+        activeCustomProviderId: activeId,
+      })
+      .then(() => {
+        this.customModelStates.delete(providerId);
+        this.customDraft = null;
+        new Notice("已删除供应商");
+        this.options.rerender();
+      });
   }
 
   private renderDatabaseCard(
@@ -936,6 +1188,8 @@ export class CcSwitchProviderSettingsView {
       models: [],
       endpoint: "",
       error: "",
+      probeStatus: "idle",
+      probeError: "",
     };
     this.providerModelStates.set(key, state);
     if (rerender) this.options.rerender();
@@ -953,6 +1207,8 @@ export class CcSwitchProviderSettingsView {
           models: response.models,
           endpoint: response.endpoint,
           error: "",
+          probeStatus: "idle",
+          probeError: "",
         });
         this.options.rerender();
       })
@@ -964,6 +1220,8 @@ export class CcSwitchProviderSettingsView {
           models: [],
           endpoint: provider.baseUrl ?? "",
           error: error instanceof Error ? error.message : String(error),
+          probeStatus: "idle",
+          probeError: "",
         });
         this.options.rerender();
       });

@@ -68,8 +68,11 @@ videomemo --version
 `GROK_CODE_XAI_API_KEY`。程序实现允许 `http` 和 `https`，生产环境建议使用可信的 HTTPS；
 本地服务可使用 `http://localhost`。API key 不应写入日志、插件数据或 Git。
 
-`LLM_API_FORMAT` 默认使用 Chat Completions，也接受 `responses`、`openai_responses` 或
-`response`；`LLM_NOTES_MODEL` 可为长转写章节指定单独模型。
+`LLM_API_FORMAT` 支持三种协议：`chat_completions`（默认）、`responses`（OpenAI Responses
+API，也接受 `openai_responses`、`response`）、`anthropic_messages`（Anthropic Messages
+API，也接受 `anthropic`、`messages`）。Anthropic 模式使用 `x-api-key` 和
+`anthropic-version: 2023-06-01` 认证，请求发送到 `<base_url>/messages`；
+Chat/Responses 使用 `Authorization: Bearer`。`LLM_NOTES_MODEL` 可为长转写章节指定单独模型。
 
 ## GUI
 
@@ -173,16 +176,18 @@ npm.cmd run build
 `.venv`，未找到时回退到 PATH 中的 `python`。安装脚本会复制 `main.js`、`manifest.json`、
 `styles.css`、`LICENSE`、`NOTICE` 和 `COPYRIGHT.md`；对应 TypeScript 源码与构建配置保留在本仓库。
 
-供应商支持三种来源：只读 cc-switch 数据库、项目环境配置，以及手动添加的 OpenAI-compatible
-自定义供应商。自定义供应商可填写 API 根地址、API key 和协议格式，插件通过 `/models` 自动
-发现模型，并提供不调用聊天模型的“测试连接”。Base URL 应填写 `https://example.com/v1` 这类
-API 根地址，不要填写 `/chat/completions` 或 `/responses`。测试/刷新模型会把 Bearer key 发送到
-该供应商的 `/models` 端点；生产环境应使用可信 HTTPS，localhost 可使用 HTTP。
+供应商支持两种来源：只读 cc-switch 数据库，以及手动添加的 OpenAI-compatible
+自定义供应商。自定义供应商支持添加多个，每个可填写名称、API 根地址、API key、协议格式
+和模型，随时切换当前使用的供应商。插件通过 `/models` 自动发现模型；“测试连接”会先获取
+模型列表，再向所选模型发送一次最小真实请求以验证模型可调用（消耗极少量 token）。
+Base URL 应填写 `https://example.com/v1` 这类 API 根地址，不要填写 `/chat/completions`、
+`/responses` 或 `/messages`。测试/刷新模型会把凭据发送到该供应商端点；生产环境应使用可信
+HTTPS，localhost 可使用 HTTP。
 
-按当前设置，自定义 API key 会明文保存在当前 Vault 的
+每个自定义供应商的 API key 均会明文保存在当前 Vault 的
 `.obsidian/plugins/video-memo/data.json`，不会加入命令行、任务日志或输出文件。不要提交或分享
 该文件，也不要把它同步到不受信任的设备。旧 Obsidian/Electron 不支持 `node:sqlite` 时仍可使用
-环境配置或自定义供应商。
+自定义供应商。
 
 插件与 Python 引擎分层许可：Python 根项目 Apache-2.0；插件 AGPL-3.0-or-later。详见
 `LICENSE`、`NOTICE`、`obsidian-plugin/LICENSE`、`obsidian-plugin/COPYRIGHT.md` 和

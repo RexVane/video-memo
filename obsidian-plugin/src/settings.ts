@@ -1,5 +1,10 @@
 import { loadCcSwitchProviders } from "./ccswitch";
-import type { CcSwitchUiSettings, ProviderSource } from "./ccswitch-settings";
+import type {
+  CcSwitchUiSettings,
+  CustomProviderApiFormat,
+  CustomProviderConfig,
+  ProviderSource,
+} from "./ccswitch-settings";
 
 export interface VideoMemoSettings extends CcSwitchUiSettings {
   projectPath: string;
@@ -15,14 +20,43 @@ export const DEFAULT_SETTINGS: VideoMemoSettings = {
   ccSwitchFollowCurrent: true,
   ccSwitchProviderId: "",
   model: "",
-  customProviderName: "",
-  customProviderBaseUrl: "",
-  customProviderApiKey: "",
-  customProviderModel: "",
-  customProviderApiFormat: "chat_completions",
+  customProviders: [],
+  activeCustomProviderId: "",
   targetFolder: "Video Memos",
   cleanupMedia: false,
 };
+
+function normalizeApiFormat(value: unknown): CustomProviderApiFormat {
+  if (typeof value !== "string") return "chat_completions";
+  const normalized = value.trim().toLowerCase().replace("-", "_");
+  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
+    return "anthropic_messages";
+  }
+  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
+    return "responses";
+  }
+  return "chat_completions";
+}
+
+function normalizeCustomProviders(raw: unknown): CustomProviderConfig[] {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
+  const result: CustomProviderConfig[] = [];
+  for (let index = 0; index < raw.length; index++) {
+    const item = raw[index] as Record<string, unknown> | null;
+    if (!item || typeof item !== "object") continue;
+    const name = typeof item.name === "string" ? item.name : "";
+    const baseUrl = typeof item.baseUrl === "string" ? item.baseUrl : "";
+    const apiKey = typeof item.apiKey === "string" ? item.apiKey : "";
+    const model = typeof item.model === "string" ? item.model : "";
+    const apiFormat = normalizeApiFormat(item.apiFormat);
+    let id = typeof item.id === "string" && item.id ? item.id : `cp_${Date.now()}_${index}`;
+    if (seen.has(id)) id = `${id}_${index}`;
+    seen.add(id);
+    result.push({ id, name, baseUrl, apiKey, model, apiFormat });
+  }
+  return result;
+}
 
 export function normalizeSettings(
   stored: Partial<VideoMemoSettings> | null,
@@ -30,12 +64,35 @@ export function normalizeSettings(
   const stringValue = (value: unknown, fallback: string): string =>
     typeof value === "string" ? value : fallback;
   const storedProviderSource = stored?.providerSource;
-  const providerSource: ProviderSource =
-    storedProviderSource === "environment" || storedProviderSource === "custom"
-      ? storedProviderSource
-      : "ccswitch";
-  const customProviderApiFormat =
-    stored?.customProviderApiFormat === "responses" ? "responses" : "chat_completions";
+  const providerSource: ProviderSource = storedProviderSource === "custom" ? "custom" : "ccswitch";
+
+  let customProviders = normalizeCustomProviders(stored?.customProviders);
+
+  // One-time migration from the legacy single-provider fields.
+  const legacy = stored as Record<string, unknown> | null;
+  const legacyBaseUrl = typeof legacy?.customProviderBaseUrl === "string" ? legacy.customProviderBaseUrl : "";
+  const legacyApiKey = typeof legacy?.customProviderApiKey === "string" ? legacy.customProviderApiKey : "";
+  if (
+    customProviders.length === 0 &&
+    (legacyBaseUrl.trim() || legacyApiKey.trim())
+  ) {
+    const migrated: CustomProviderConfig = {
+      id: `cp_migrated_${Date.now()}`,
+      name: typeof legacy?.customProviderName === "string" ? legacy.customProviderName : "已迁移供应商",
+      baseUrl: legacyBaseUrl,
+      apiKey: legacyApiKey,
+      model: typeof legacy?.customProviderModel === "string" ? legacy.customProviderModel : "",
+      apiFormat: normalizeApiFormat(legacy?.customProviderApiFormat),
+    };
+    customProviders = [migrated];
+  }
+
+  const activeCustomProviderId = stringValue(
+    stored?.activeCustomProviderId,
+    customProviders[0]?.id ?? "",
+  );
+  const activeIdIsValid = customProviders.some((p) => p.id === activeCustomProviderId);
+
   return {
     projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
     providerSource,
@@ -50,23 +107,8 @@ export function normalizeSettings(
       DEFAULT_SETTINGS.ccSwitchProviderId,
     ),
     model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
-    customProviderName: stringValue(
-      stored?.customProviderName,
-      DEFAULT_SETTINGS.customProviderName,
-    ),
-    customProviderBaseUrl: stringValue(
-      stored?.customProviderBaseUrl,
-      DEFAULT_SETTINGS.customProviderBaseUrl,
-    ),
-    customProviderApiKey: stringValue(
-      stored?.customProviderApiKey,
-      DEFAULT_SETTINGS.customProviderApiKey,
-    ),
-    customProviderModel: stringValue(
-      stored?.customProviderModel,
-      DEFAULT_SETTINGS.customProviderModel,
-    ),
-    customProviderApiFormat,
+    customProviders,
+    activeCustomProviderId: activeIdIsValid ? activeCustomProviderId : (customProviders[0]?.id ?? ""),
     targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
     cleanupMedia:
       typeof stored?.cleanupMedia === "boolean"
@@ -76,17 +118,27 @@ export function normalizeSettings(
 }
 
 /**
+ * Resolve the currently active custom provider config, or null if none is selected.
+ */
+export function activeCustomProvider(settings: VideoMemoSettings): CustomProviderConfig | null {
+  const list = settings.customProviders;
+  if (list.length === 0) return null;
+  return (
+    list.find((p) => p.id === settings.activeCustomProviderId) ?? list[0] ?? null
+  );
+}
+
+/**
  * One-line human summary of the provider a task would use right now.
  * Reads the cc-switch database, so callers should treat it as best effort.
  */
 export function describeProviderSelection(settings: VideoMemoSettings): string {
-  if (settings.providerSource === "environment") {
-    return settings.model ? `环境配置 · ${settings.model}` : "使用项目环境变量配置";
-  }
   if (settings.providerSource === "custom") {
-    const name = settings.customProviderName.trim() || "未命名供应商";
-    const model = settings.customProviderModel.trim();
-    if (!settings.customProviderBaseUrl.trim() || !settings.customProviderApiKey.trim()) {
+    const provider = activeCustomProvider(settings);
+    if (!provider) return "自定义 · 尚未添加供应商";
+    const name = provider.name.trim() || "未命名供应商";
+    const model = provider.model.trim();
+    if (!provider.baseUrl.trim() || !provider.apiKey.trim()) {
       return `自定义 · ${name} · 配置需要检查`;
     }
     return model ? `自定义 · ${name} · 模型 ${model}` : `自定义 · ${name} · 尚未选择模型`;

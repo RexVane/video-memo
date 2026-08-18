@@ -12,6 +12,7 @@ installed from their upstream Python distributions:
 | Component | Use | License / source |
 | --- | --- | --- |
 | openai | OpenAI-compatible API client | Apache-2.0 · https://github.com/openai/openai-python |
+| httpx | Anthropic Messages HTTP client | BSD-3-Clause · https://github.com/encode/httpx |
 | yt-dlp | Site extraction, subtitles, and media downloads | Unlicense for source/PyPI distributions · https://github.com/yt-dlp/yt-dlp |
 | faster-whisper | Local speech recognition | MIT · https://github.com/SYSTRAN/faster-whisper |
 | python-dotenv | `.env` loading | BSD-3-Clause · https://github.com/theskumar/python-dotenv |
