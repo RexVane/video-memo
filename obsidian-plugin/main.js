@@ -1204,7 +1204,6 @@ var RunProgressModal = class extends import_obsidian2.Modal {
 // src/settings.ts
 var DEFAULT_SETTINGS = {
   projectPath: "",
-  pythonPath: "",
   providerSource: "ccswitch",
   ccSwitchDbPath: "",
   ccSwitchAppType: "codex",
@@ -1218,7 +1217,6 @@ function normalizeSettings(stored) {
   const stringValue = (value, fallback) => typeof value === "string" ? value : fallback;
   return {
     projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
-    pythonPath: stringValue(stored?.pythonPath, DEFAULT_SETTINGS.pythonPath),
     providerSource: stored?.providerSource === "environment" ? "environment" : "ccswitch",
     ccSwitchDbPath: stringValue(stored?.ccSwitchDbPath, DEFAULT_SETTINGS.ccSwitchDbPath),
     ccSwitchAppType: stringValue(stored?.ccSwitchAppType, DEFAULT_SETTINGS.ccSwitchAppType),
@@ -1816,14 +1814,14 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
       (text) => text.setPlaceholder("D:\\AIApp\\video-memo").setValue(this.plugin.settings.projectPath).onChange(async (value) => {
         this.plugin.settings.projectPath = value.trim();
         await this.plugin.saveData(this.plugin.settings);
+        this.display();
       })
     );
-    new import_obsidian4.Setting(containerEl).setName("Python \u8DEF\u5F84").setDesc("\u7559\u7A7A\u65F6\u4F18\u5148\u4F7F\u7528\u9879\u76EE .venv\uFF0C\u968F\u540E\u4F7F\u7528 PATH \u4E2D\u7684 python").addText(
-      (text) => text.setValue(this.plugin.settings.pythonPath).onChange(async (value) => {
-        this.plugin.settings.pythonPath = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
-      })
-    );
+    const projectPath = this.plugin.settings.projectPath.trim();
+    const pythonPath = projectPath ? this.plugin.resolvePython(projectPath) : "";
+    new import_obsidian4.Setting(containerEl).setName("Python \u8DEF\u5F84").setDesc("\u81EA\u52A8\u68C0\u6D4B\u9879\u76EE .venv\uFF0C\u672A\u627E\u5230\u65F6\u4F7F\u7528\u7CFB\u7EDF PATH \u4E2D\u7684 python").addText((text) => {
+      text.setPlaceholder("\u586B\u5199\u9879\u76EE\u76EE\u5F55\u540E\u81EA\u52A8\u8BC6\u522B").setValue(pythonPath).inputEl.disabled = true;
+    });
     containerEl.createDiv({
       cls: "video-memo-settings-section-label",
       text: "\u8F93\u51FA"
@@ -2155,7 +2153,6 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     return adapter.getBasePath();
   }
   resolvePython(projectPath) {
-    if (this.settings.pythonPath.trim()) return this.settings.pythonPath.trim();
     const virtualEnvPython = (0, import_node_path2.join)(
       projectPath,
       ".venv",

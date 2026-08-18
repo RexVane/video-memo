@@ -139,8 +139,7 @@ export default class VideoMemoPlugin extends Plugin {
     return adapter.getBasePath();
   }
 
-  private resolvePython(projectPath: string): string {
-    if (this.settings.pythonPath.trim()) return this.settings.pythonPath.trim();
+  resolvePython(projectPath: string): string {
     const virtualEnvPython = join(
       projectPath,
       ".venv",

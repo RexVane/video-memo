@@ -84,17 +84,20 @@ export class VideoMemoSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.projectPath = value.trim();
             await this.plugin.saveData(this.plugin.settings);
+            this.display();
           }),
       );
+    const projectPath = this.plugin.settings.projectPath.trim();
+    const pythonPath = projectPath ? this.plugin.resolvePython(projectPath) : "";
     new Setting(containerEl)
       .setName("Python 路径")
-      .setDesc("留空时优先使用项目 .venv，随后使用 PATH 中的 python")
-      .addText((text) =>
-        text.setValue(this.plugin.settings.pythonPath).onChange(async (value) => {
-          this.plugin.settings.pythonPath = value.trim();
-          await this.plugin.saveData(this.plugin.settings);
-        }),
-      );
+      .setDesc("自动检测项目 .venv，未找到时使用系统 PATH 中的 python")
+      .addText((text) => {
+        text
+          .setPlaceholder("填写项目目录后自动识别")
+          .setValue(pythonPath)
+          .inputEl.disabled = true;
+      });
     containerEl.createDiv({
       cls: "video-memo-settings-section-label",
       text: "输出",

@@ -8,6 +8,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
@@ -31,6 +32,31 @@ API_ERROR_MESSAGES = {
     429: "API 请求过于频繁或已达到速率限制，请稍后重试。",
 }
 SummaryProgressCb = Callable[[str, float], None]
+
+TITLE_TAG_OPEN = "<<<TITLE>>>"
+TITLE_TAG_CLOSE = "<<<END>>>"
+
+
+@dataclass
+class SummarizeResult:
+    """Summary body plus a short content-derived title for note naming."""
+
+    body: str
+    note_title: str
+
+
+def _split_title(raw: str, fallback: str) -> tuple[str, str]:
+    """Extract a <<<TITLE>>>...<<<END>>> prefix; return (body, title)."""
+    match = re.search(
+        re.escape(TITLE_TAG_OPEN) + r"\s*(.+?)\s*" + re.escape(TITLE_TAG_CLOSE),
+        raw,
+        flags=re.DOTALL,
+    )
+    if not match:
+        return raw, fallback
+    title = match.group(1).strip()
+    body = (raw[: match.start()] + raw[match.end():]).strip()
+    return body, title or fallback
 
 
 def require_api_key(
@@ -356,6 +382,8 @@ def summarize(
         "不要生成练习题、自测题、学习任务或泛泛的课程评价。"
         "输出适合 Obsidian 阅读的 Markdown，不输出 YAML frontmatter、一级标题或重复的视频标题。"
         f"使用{output_language}输出。"
+        "在回复最开头用 <<<TITLE>>> 和 <<<END>>> 包裹一个 10-30 字的简短笔记标题，"
+        "概括材料核心主题，不要包含'笔记'或'总结'字样。"
     )
 
     user_text = f"""请基于以下材料，提炼一份一眼能抓住精华、需要时又能继续深挖的知识笔记。
@@ -472,12 +500,14 @@ flowchart LR
     overview = _response_text(resp)
     if on_progress:
         on_progress("精华知识笔记生成完成", 1.0)
+    overview, note_title = _split_title(overview, title)
     if not chapter_notes:
-        return overview
+        return SummarizeResult(body=overview, note_title=note_title)
     chapter_callouts = [_chapter_callout(note) for note in chapter_notes]
-    return (
+    body = (
         f"{overview}\n\n## 逐章参考笔记\n\n"
         "> [!info] 如何使用\n"
         "> 以下内容按原视频时间顺序保留，用于追溯上下文；默认折叠，不影响精华阅读。\n\n"
         + "\n\n".join(callout for callout in chapter_callouts if callout)
     )
+    return SummarizeResult(body=body, note_title=note_title)

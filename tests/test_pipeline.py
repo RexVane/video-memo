@@ -16,6 +16,7 @@ sys.path.insert(0, str(SRC_DIR))
 import pipeline  # noqa: E402
 from download import BrowserCookieError, DownloadResult, VideoMetadata  # noqa: E402
 from llm_config import LLMConfig  # noqa: E402
+from summarize import SummarizeResult  # noqa: E402
 from transcribe import Transcript  # noqa: E402
 
 
@@ -403,7 +404,8 @@ class PipelineTests(unittest.TestCase):
         ) as subtitle_mock, patch.object(
             pipeline, "transcribe"
         ) as transcribe_mock, patch.object(
-            pipeline, "summarize", return_value="## Summary"
+            pipeline, "summarize",
+            return_value=SummarizeResult(body="## Summary", note_title="AI标题"),
         ):
             summary_path = pipeline.run(
                 "https://example.test/captioned",
@@ -472,7 +474,8 @@ class PipelineTests(unittest.TestCase):
             "transcribe",
             return_value=Transcript(language="en", text="[00:00] Hello", segments=[]),
         ), patch.object(pipeline, "extract_frames", return_value=[]), patch.object(
-            pipeline, "summarize", return_value="## 一句话摘要\nSummary"
+            pipeline, "summarize",
+            return_value=SummarizeResult(body="## 一句话摘要\nSummary", note_title="AI标题"),
         ):
             summary_path = pipeline.run(
                 "https://example.test/video",
@@ -530,7 +533,8 @@ class PipelineTests(unittest.TestCase):
                 "transcribe",
                 return_value=Transcript(language="zh", text="[00:00] 你好", segments=[]),
             ), patch.object(pipeline, "extract_frames", return_value=[]), patch.object(
-                pipeline, "summarize", return_value="## 摘要\n本地文件总结"
+                pipeline, "summarize",
+                return_value=SummarizeResult(body="## 摘要\n本地文件总结", note_title="AI标题")
             ):
                 summary_path = pipeline.run(str(source), out_root=out_root)
 

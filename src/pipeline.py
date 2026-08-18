@@ -474,13 +474,14 @@ def regenerate_report(
         on_progress=progress,
         cancel_event=cancel_event,
     )
-    summary_path = _write_reports(work_dir, dl, summary)
+    summary_path = _write_reports(work_dir, dl, summary.body)
     if obsidian_vault:
         note_path = export_to_vault(
             summary_path,
             dl,
             obsidian_vault,
             folder=obsidian_folder,
+            note_title=summary.note_title,
         )
         progress(f"OBSIDIAN_NOTE={note_path}", 0.98)
     _update_run_info(work_dir, "run_status", "complete")
@@ -767,13 +768,14 @@ def run(
         cancel_event=cancel_event,
     )
     check_cancelled(cancel_event)
-    summary_path = _write_reports(work, dl, summary)
+    summary_path = _write_reports(work, dl, summary.body)
     if obsidian_vault:
         note_path = export_to_vault(
             summary_path,
             dl,
             obsidian_vault,
             folder=obsidian_folder,
+            note_title=summary.note_title,
         )
         progress(f"OBSIDIAN_NOTE={note_path}", 0.95)
     if cleanup_media:

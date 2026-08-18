@@ -46,6 +46,7 @@ def export_to_vault(
     vault_path: Path,
     *,
     folder: str = "Video Memos",
+    note_title: str | None = None,
 ) -> Path:
     vault = vault_path.expanduser().resolve()
     if not vault.is_dir():
@@ -56,7 +57,8 @@ def export_to_vault(
     destination = _vault_folder(vault, folder)
     destination.mkdir(parents=True, exist_ok=True)
     source_id = hashlib.sha256(metadata.webpage_url.encode("utf-8")).hexdigest()[:8]
-    note_stem = f"{_safe_name(metadata.title)}_{source_id}"
+    name_source = note_title.strip() if note_title and note_title.strip() else metadata.title
+    note_stem = f"{_safe_name(name_source)}_{source_id}"
     preferred_note_path = destination / f"{note_stem}.md"
     existing_notes = sorted(
         destination.glob(f"*_{source_id}.md"),
