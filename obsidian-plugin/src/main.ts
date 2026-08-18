@@ -10,7 +10,7 @@ import {
   normalizePath,
 } from "obsidian";
 
-import { resolveCcSwitchProviderRuntime } from "./ccswitch";
+import { normalizeOpenAiBaseUrl, resolveCcSwitchProviderRuntime } from "./ccswitch";
 import { RunProgressModal, type TaskState } from "./run-progress";
 import {
   DEFAULT_SETTINGS,
@@ -40,6 +40,7 @@ export default class VideoMemoPlugin extends Plugin {
   private activeProcess: ChildProcessWithoutNullStreams | null = null;
   private statusEl: HTMLElement | null = null;
   private stderrTail = "";
+  private activeProviderSecret = "";
   private taskState: TaskState | null = null;
   private progressModal: RunProgressModal | null = null;
 
@@ -156,6 +157,16 @@ export default class VideoMemoPlugin extends Plugin {
     app.setting.openTabById(this.manifest.id);
   }
 
+  private redactProviderSecrets(value: string): string {
+    let redacted = value;
+    if (this.activeProviderSecret) {
+      redacted = redacted.replaceAll(this.activeProviderSecret, "***");
+    }
+    return redacted
+      .replace(/(authorization\s*:\s*bearer\s+)[^\s,;]+/gi, "$1***")
+      .replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s,;]+/gi, "$1***");
+  }
+
   private setStatus(text: string): void {
     this.statusEl?.setText(text);
     this.statusEl?.toggleClass("is-clickable", this.taskState !== null);
@@ -194,8 +205,9 @@ export default class VideoMemoPlugin extends Plugin {
     let selectedModel = this.settings.model.trim();
     let providerBaseUrl = "";
     let providerLabel = selectedModel ? `环境配置 · ${selectedModel}` : "环境配置";
-    if (this.settings.providerSource === "ccswitch") {
-      try {
+    this.activeProviderSecret = "";
+    try {
+      if (this.settings.providerSource === "ccswitch") {
         const runtime = resolveCcSwitchProviderRuntime({
           dbPath: this.settings.ccSwitchDbPath,
           appType: this.settings.ccSwitchAppType,
@@ -207,19 +219,33 @@ export default class VideoMemoPlugin extends Plugin {
         providerLabel = selectedModel
           ? `${runtime.name} · ${selectedModel}`
           : `${runtime.name} · 默认模型`;
+        this.activeProviderSecret = runtime.apiKey;
         engineEnv.LLM_API_KEY = runtime.apiKey;
         engineEnv.LLM_BASE_URL = runtime.baseUrl;
-        // A provider without an explicit wire format is a normal Chat
-        // Completions provider. Do not let a stale host-process setting select
-        // the Responses API for it.
         engineEnv.LLM_API_FORMAT = runtime.apiFormat || "chat_completions";
         if (!selectedModel) delete engineEnv.LLM_MODEL;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        new Notice(`无法使用 cc-switch 供应商\n${message}`, 8000);
-        this.openPluginSettings();
-        return;
+      } else if (this.settings.providerSource === "custom") {
+        const name = this.settings.customProviderName.trim();
+        const apiKey = this.settings.customProviderApiKey.trim();
+        selectedModel = this.settings.customProviderModel.trim();
+        providerBaseUrl = normalizeOpenAiBaseUrl(this.settings.customProviderBaseUrl);
+        if (!name) throw new Error("请填写自定义供应商名称");
+        if (!apiKey) throw new Error("请填写自定义供应商 API Key");
+        if (!selectedModel) throw new Error("请选择自定义供应商模型");
+        providerLabel = `自定义 · ${name} · ${selectedModel}`;
+        this.activeProviderSecret = apiKey;
+        engineEnv.LLM_API_KEY = apiKey;
+        engineEnv.LLM_BASE_URL = providerBaseUrl;
+        engineEnv.LLM_API_FORMAT = this.settings.customProviderApiFormat;
+        delete engineEnv.LLM_MODEL;
       }
+    } catch (error) {
+      const message = this.redactProviderSecrets(
+        error instanceof Error ? error.message : String(error),
+      );
+      new Notice(`无法使用所选供应商\n${message}`, 8000);
+      this.openPluginSettings();
+      return;
     }
 
     const args = [
@@ -265,10 +291,12 @@ export default class VideoMemoPlugin extends Plugin {
       this.handleOutputLine(line, vaultPath);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-4000);
+      this.stderrTail = this.redactProviderSecrets(
+        (this.stderrTail + chunk.toString("utf8")).slice(-4000),
+      );
     });
     child.on("error", (error) => {
-      this.finishTask(false, `无法启动 Python: ${error.message}`);
+      this.finishTask(false, this.redactProviderSecrets(`无法启动 Python: ${error.message}`));
     });
     child.on("close", (code) => {
       if (this.activeProcess !== child) return;

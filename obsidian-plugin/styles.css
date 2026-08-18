@@ -1308,6 +1308,146 @@
   min-height: 110px;
 }
 
+.ccswitch-custom-form,
+.ccswitch-custom-card {
+  background: var(--background-primary-alt);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+  box-sizing: border-box;
+  min-width: 0;
+  padding: 16px;
+  width: 100%;
+}
+
+.ccswitch-custom-form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.ccswitch-custom-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ccswitch-custom-label {
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  line-height: 1.3;
+}
+
+.ccswitch-custom-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.ccswitch-custom-form input[type="text"],
+.ccswitch-custom-form input[type="password"],
+.ccswitch-custom-form input[type="url"],
+.ccswitch-custom-form select,
+.ccswitch-custom-model-input,
+.ccswitch-custom-model-select {
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 7px;
+  box-sizing: border-box;
+  color: var(--text-normal);
+  min-height: 36px;
+  min-width: 0;
+  padding: 7px 10px;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+  width: 100%;
+}
+
+.ccswitch-custom-form select,
+.ccswitch-custom-model-select {
+  appearance: none;
+  background: var(--background-primary)
+    url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23888888' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E")
+    no-repeat right 10px center / 12px !important;
+  padding-right: 30px;
+}
+
+.ccswitch-custom-form input[type="text"]:focus-visible,
+.ccswitch-custom-form input[type="password"]:focus-visible,
+.ccswitch-custom-form input[type="url"]:focus-visible,
+.ccswitch-custom-form select:focus-visible,
+.ccswitch-custom-model-input:focus-visible,
+.ccswitch-custom-model-select:focus-visible {
+  border-color: var(--interactive-accent);
+  box-shadow: 0 0 0 2px var(--vs-accent-soft);
+  outline: 1px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+.ccswitch-custom-password-row {
+  align-items: center;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+
+.ccswitch-custom-password-row input[type="password"],
+.ccswitch-custom-password-row input[type="text"] {
+  min-width: 0;
+  width: 100%;
+}
+
+.ccswitch-custom-model-controls {
+  align-items: end;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+}
+
+.ccswitch-custom-action-row {
+  align-items: center;
+  border-top: 1px solid var(--background-modifier-border);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 2px;
+  padding-top: 14px;
+}
+
+.ccswitch-custom-status {
+  align-items: flex-start;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  display: flex;
+  font-size: var(--font-ui-smaller);
+  gap: 7px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  padding: 8px 10px;
+}
+
+.ccswitch-custom-status.is-success {
+  background: color-mix(in srgb, var(--color-green, var(--interactive-accent)) 10%, transparent);
+  border-color: color-mix(in srgb, var(--color-green, var(--interactive-accent)) 30%, transparent);
+  color: var(--color-green, var(--text-normal));
+}
+
+.ccswitch-custom-status.is-error {
+  background: rgba(var(--color-red-rgb), 0.08);
+  border-color: rgba(var(--color-red-rgb), 0.3);
+  color: var(--text-error);
+}
+
+.ccswitch-custom-status.is-warning {
+  background: color-mix(in srgb, var(--color-yellow, var(--text-warning)) 10%, transparent);
+  border-color: color-mix(in srgb, var(--color-yellow, var(--text-warning)) 30%, transparent);
+  color: var(--text-warning, var(--text-normal));
+}
+
 @media (max-width: 720px) {
   .video-memo-settings-tab {
     padding: 20px 16px 40px;
@@ -1341,7 +1481,17 @@
     flex-direction: column;
   }
 
-  .ccswitch-source-switch,
+  .ccswitch-source-switch {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    width: 100%;
+  }
+
+  .ccswitch-source-button {
+    min-width: 0;
+    width: 100%;
+  }
+
   .ccswitch-database-controls,
   .ccswitch-detail-actions {
     justify-content: flex-start;
@@ -1571,13 +1721,34 @@
   }
 
   .ccswitch-source-switch {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    width: 100%;
+    grid-template-columns: repeat(auto-fit, minmax(min(120px, 100%), 1fr));
   }
 
   .ccswitch-source-button {
     justify-content: center;
+    padding-inline: 6px;
+  }
+
+  .ccswitch-custom-form,
+  .ccswitch-custom-card {
+    padding: 12px;
+  }
+
+  .ccswitch-custom-password-row,
+  .ccswitch-custom-model-controls {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .ccswitch-custom-password-row .ccswitch-action,
+  .ccswitch-custom-action-row .ccswitch-action {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  .ccswitch-custom-action-row {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .ccswitch-provider-trailing .ccswitch-badge {

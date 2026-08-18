@@ -169,10 +169,20 @@ npm.cmd run build
 <your-vault>/.obsidian/plugins/video-memo/
 ```
 
-启用插件后，在设置中填写包含 `src/pipeline.py` 的项目目录。Python 路径留空时优先使用该
-项目 `.venv`。安装脚本会复制 `main.js`、`manifest.json`、`styles.css`、`LICENSE`、`NOTICE`
-和 `COPYRIGHT.md`；对应 TypeScript 源码与构建配置保留在本仓库。cc-switch 数据库只读打开；
-旧 Obsidian/Electron 不支持 `node:sqlite` 时可切换到环境变量配置。
+启用插件后，在设置中填写包含 `src/pipeline.py` 的项目目录；Python 路径会自动检测项目
+`.venv`，未找到时回退到 PATH 中的 `python`。安装脚本会复制 `main.js`、`manifest.json`、
+`styles.css`、`LICENSE`、`NOTICE` 和 `COPYRIGHT.md`；对应 TypeScript 源码与构建配置保留在本仓库。
+
+供应商支持三种来源：只读 cc-switch 数据库、项目环境配置，以及手动添加的 OpenAI-compatible
+自定义供应商。自定义供应商可填写 API 根地址、API key 和协议格式，插件通过 `/models` 自动
+发现模型，并提供不调用聊天模型的“测试连接”。Base URL 应填写 `https://example.com/v1` 这类
+API 根地址，不要填写 `/chat/completions` 或 `/responses`。测试/刷新模型会把 Bearer key 发送到
+该供应商的 `/models` 端点；生产环境应使用可信 HTTPS，localhost 可使用 HTTP。
+
+按当前设置，自定义 API key 会明文保存在当前 Vault 的
+`.obsidian/plugins/video-memo/data.json`，不会加入命令行、任务日志或输出文件。不要提交或分享
+该文件，也不要把它同步到不受信任的设备。旧 Obsidian/Electron 不支持 `node:sqlite` 时仍可使用
+环境配置或自定义供应商。
 
 插件与 Python 引擎分层许可：Python 根项目 Apache-2.0；插件 AGPL-3.0-or-later。详见
 `LICENSE`、`NOTICE`、`obsidian-plugin/LICENSE`、`obsidian-plugin/COPYRIGHT.md` 和
@@ -195,8 +205,9 @@ GitHub Actions 会验证 Python 3.10–3.13、插件类型检查和构建产物�
 
 ## 安全与贡献
 
-不要提交 API key、Cookie、真实媒体、转写、Whisper 权重、输出目录或 Vault 内容。漏洞请按
-`SECURITY.md` 私下报告；贡献流程见 `CONTRIBUTING.md`，行为准则见 `CODE_OF_CONDUCT.md`。
+不要提交 API key、Cookie、自定义供应商 `data.json`、真实媒体、转写、Whisper 权重、输出目录
+或 Vault 内容。漏洞请按 `SECURITY.md` 私下报告；贡献流程见 `CONTRIBUTING.md`，行为准则见
+`CODE_OF_CONDUCT.md`。
 
 ## 许可证
 

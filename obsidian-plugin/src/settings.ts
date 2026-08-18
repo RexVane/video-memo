@@ -1,9 +1,8 @@
 import { loadCcSwitchProviders } from "./ccswitch";
-import type { CcSwitchUiSettings } from "./ccswitch-settings";
+import type { CcSwitchUiSettings, ProviderSource } from "./ccswitch-settings";
 
 export interface VideoMemoSettings extends CcSwitchUiSettings {
   projectPath: string;
-  model: string;
   targetFolder: string;
   cleanupMedia: boolean;
 }
@@ -16,6 +15,11 @@ export const DEFAULT_SETTINGS: VideoMemoSettings = {
   ccSwitchFollowCurrent: true,
   ccSwitchProviderId: "",
   model: "",
+  customProviderName: "",
+  customProviderBaseUrl: "",
+  customProviderApiKey: "",
+  customProviderModel: "",
+  customProviderApiFormat: "chat_completions",
   targetFolder: "Video Memos",
   cleanupMedia: false,
 };
@@ -25,9 +29,16 @@ export function normalizeSettings(
 ): VideoMemoSettings {
   const stringValue = (value: unknown, fallback: string): string =>
     typeof value === "string" ? value : fallback;
+  const storedProviderSource = stored?.providerSource;
+  const providerSource: ProviderSource =
+    storedProviderSource === "environment" || storedProviderSource === "custom"
+      ? storedProviderSource
+      : "ccswitch";
+  const customProviderApiFormat =
+    stored?.customProviderApiFormat === "responses" ? "responses" : "chat_completions";
   return {
     projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
-    providerSource: stored?.providerSource === "environment" ? "environment" : "ccswitch",
+    providerSource,
     ccSwitchDbPath: stringValue(stored?.ccSwitchDbPath, DEFAULT_SETTINGS.ccSwitchDbPath),
     ccSwitchAppType: stringValue(stored?.ccSwitchAppType, DEFAULT_SETTINGS.ccSwitchAppType),
     ccSwitchFollowCurrent:
@@ -39,6 +50,23 @@ export function normalizeSettings(
       DEFAULT_SETTINGS.ccSwitchProviderId,
     ),
     model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
+    customProviderName: stringValue(
+      stored?.customProviderName,
+      DEFAULT_SETTINGS.customProviderName,
+    ),
+    customProviderBaseUrl: stringValue(
+      stored?.customProviderBaseUrl,
+      DEFAULT_SETTINGS.customProviderBaseUrl,
+    ),
+    customProviderApiKey: stringValue(
+      stored?.customProviderApiKey,
+      DEFAULT_SETTINGS.customProviderApiKey,
+    ),
+    customProviderModel: stringValue(
+      stored?.customProviderModel,
+      DEFAULT_SETTINGS.customProviderModel,
+    ),
+    customProviderApiFormat,
     targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
     cleanupMedia:
       typeof stored?.cleanupMedia === "boolean"
@@ -54,6 +82,14 @@ export function normalizeSettings(
 export function describeProviderSelection(settings: VideoMemoSettings): string {
   if (settings.providerSource === "environment") {
     return settings.model ? `环境配置 · ${settings.model}` : "使用项目环境变量配置";
+  }
+  if (settings.providerSource === "custom") {
+    const name = settings.customProviderName.trim() || "未命名供应商";
+    const model = settings.customProviderModel.trim();
+    if (!settings.customProviderBaseUrl.trim() || !settings.customProviderApiKey.trim()) {
+      return `自定义 · ${name} · 配置需要检查`;
+    }
+    return model ? `自定义 · ${name} · 模型 ${model}` : `自定义 · ${name} · 尚未选择模型`;
   }
   try {
     const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;

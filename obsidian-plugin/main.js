@@ -945,7 +945,7 @@ function resolveCcSwitchProviderRuntime(options) {
     db.close();
   }
 }
-function openAiModelsUrl(baseUrl) {
+function normalizeOpenAiBaseUrl(baseUrl) {
   const url = new URL(baseUrl.trim());
   if (!["http:", "https:"].includes(url.protocol)) {
     throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u5FC5\u987B\u4F7F\u7528 http \u6216 https");
@@ -956,6 +956,15 @@ function openAiModelsUrl(baseUrl) {
   if (url.search || url.hash) {
     throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u5305\u542B\u67E5\u8BE2\u53C2\u6570\u6216\u951A\u70B9");
   }
+  const path = url.pathname.replace(/\/+$/, "");
+  if (/\/(?:chat\/completions|responses)$/i.test(path)) {
+    throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u4EE5 /chat/completions \u6216 /responses \u7ED3\u5C3E");
+  }
+  url.pathname = path || "/";
+  return url.toString();
+}
+function openAiModelsUrl(baseUrl) {
+  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
   const path = url.pathname.replace(/\/+$/, "");
   if (!path) {
     url.pathname = "/v1/models";
@@ -986,14 +995,8 @@ function responseErrorDetail(text) {
     return "";
   }
 }
-async function fetchCcSwitchProviderModels(options) {
-  const runtime = resolveCcSwitchProviderRuntime({
-    dbPath: options.dbPath,
-    appType: options.appType,
-    followCurrent: false,
-    providerId: options.providerId
-  });
-  const endpoint = openAiModelsUrl(runtime.baseUrl);
+async function fetchOpenAiCompatibleModels(options) {
+  const endpoint = openAiModelsUrl(options.baseUrl);
   let timeout;
   try {
     const response = await Promise.race([
@@ -1002,7 +1005,7 @@ async function fetchCcSwitchProviderModels(options) {
         method: "GET",
         headers: {
           Accept: "application/json",
-          Authorization: `Bearer ${runtime.apiKey}`
+          Authorization: `Bearer ${options.apiKey}`
         },
         throw: false
       }),
@@ -1028,10 +1031,22 @@ async function fetchCcSwitchProviderModels(options) {
     return { endpoint, models };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message.replaceAll(runtime.apiKey, "***"));
+    throw new Error(message.replaceAll(options.apiKey, "***"));
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+async function fetchCcSwitchProviderModels(options) {
+  const runtime = resolveCcSwitchProviderRuntime({
+    dbPath: options.dbPath,
+    appType: options.appType,
+    followCurrent: false,
+    providerId: options.providerId
+  });
+  return fetchOpenAiCompatibleModels({
+    baseUrl: runtime.baseUrl,
+    apiKey: runtime.apiKey
+  });
 }
 
 // src/run-progress.ts
@@ -1210,14 +1225,22 @@ var DEFAULT_SETTINGS = {
   ccSwitchFollowCurrent: true,
   ccSwitchProviderId: "",
   model: "",
+  customProviderName: "",
+  customProviderBaseUrl: "",
+  customProviderApiKey: "",
+  customProviderModel: "",
+  customProviderApiFormat: "chat_completions",
   targetFolder: "Video Memos",
   cleanupMedia: false
 };
 function normalizeSettings(stored) {
   const stringValue = (value, fallback) => typeof value === "string" ? value : fallback;
+  const storedProviderSource = stored?.providerSource;
+  const providerSource = storedProviderSource === "environment" || storedProviderSource === "custom" ? storedProviderSource : "ccswitch";
+  const customProviderApiFormat = stored?.customProviderApiFormat === "responses" ? "responses" : "chat_completions";
   return {
     projectPath: stringValue(stored?.projectPath, DEFAULT_SETTINGS.projectPath),
-    providerSource: stored?.providerSource === "environment" ? "environment" : "ccswitch",
+    providerSource,
     ccSwitchDbPath: stringValue(stored?.ccSwitchDbPath, DEFAULT_SETTINGS.ccSwitchDbPath),
     ccSwitchAppType: stringValue(stored?.ccSwitchAppType, DEFAULT_SETTINGS.ccSwitchAppType),
     ccSwitchFollowCurrent: typeof stored?.ccSwitchFollowCurrent === "boolean" ? stored.ccSwitchFollowCurrent : DEFAULT_SETTINGS.ccSwitchFollowCurrent,
@@ -1226,6 +1249,23 @@ function normalizeSettings(stored) {
       DEFAULT_SETTINGS.ccSwitchProviderId
     ),
     model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
+    customProviderName: stringValue(
+      stored?.customProviderName,
+      DEFAULT_SETTINGS.customProviderName
+    ),
+    customProviderBaseUrl: stringValue(
+      stored?.customProviderBaseUrl,
+      DEFAULT_SETTINGS.customProviderBaseUrl
+    ),
+    customProviderApiKey: stringValue(
+      stored?.customProviderApiKey,
+      DEFAULT_SETTINGS.customProviderApiKey
+    ),
+    customProviderModel: stringValue(
+      stored?.customProviderModel,
+      DEFAULT_SETTINGS.customProviderModel
+    ),
+    customProviderApiFormat,
     targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
     cleanupMedia: typeof stored?.cleanupMedia === "boolean" ? stored.cleanupMedia : DEFAULT_SETTINGS.cleanupMedia
   };
@@ -1233,6 +1273,14 @@ function normalizeSettings(stored) {
 function describeProviderSelection(settings) {
   if (settings.providerSource === "environment") {
     return settings.model ? `\u73AF\u5883\u914D\u7F6E \xB7 ${settings.model}` : "\u4F7F\u7528\u9879\u76EE\u73AF\u5883\u53D8\u91CF\u914D\u7F6E";
+  }
+  if (settings.providerSource === "custom") {
+    const name = settings.customProviderName.trim() || "\u672A\u547D\u540D\u4F9B\u5E94\u5546";
+    const model = settings.customProviderModel.trim();
+    if (!settings.customProviderBaseUrl.trim() || !settings.customProviderApiKey.trim()) {
+      return `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u914D\u7F6E\u9700\u8981\u68C0\u67E5`;
+    }
+    return model ? `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u6A21\u578B ${model}` : `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u5C1A\u672A\u9009\u62E9\u6A21\u578B`;
   }
   try {
     const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
@@ -1299,27 +1347,36 @@ var CcSwitchProviderSettingsView = class {
   options;
   selectedAppType = "codex";
   selectedProviderId = "";
+  visibleSource = null;
   configTab = "parsed";
   rawDetailExpanded = false;
   providerModelStates = /* @__PURE__ */ new Map();
+  customModelState = null;
+  customDraft = null;
   modelRequestId = 0;
   constructor(options) {
     this.options = options;
   }
   showProviderList() {
     this.selectedProviderId = "";
+    this.visibleSource = null;
+    this.customDraft = null;
+    this.customModelState = null;
     this.configTab = "parsed";
     this.rawDetailExpanded = false;
   }
   render(parent) {
     const settings = this.options.getSettings();
+    const source = this.visibleSource ?? settings.providerSource;
     const section = parent.createDiv({ cls: "ccswitch-section" });
     let response = null;
     let loadError = "";
-    try {
-      response = loadCcSwitchProviders(settings.ccSwitchDbPath);
-    } catch (error) {
-      loadError = error instanceof Error ? error.message : String(error);
+    if (source === "ccswitch") {
+      try {
+        response = loadCcSwitchProviders(settings.ccSwitchDbPath);
+      } catch (error) {
+        loadError = error instanceof Error ? error.message : String(error);
+      }
     }
     const selectedProvider = response?.providers.find(
       (provider) => provider.id === this.selectedProviderId
@@ -1333,7 +1390,7 @@ var CcSwitchProviderSettingsView = class {
       this.renderProviderDetail(detail, selectedProvider, settings, modelOptions, modelState);
       return true;
     }
-    if (this.selectedProviderId) this.showProviderList();
+    if (this.selectedProviderId) this.selectedProviderId = "";
     const back = section.createDiv({ cls: "ccswitch-page-back" });
     actionButton(back, {
       label: "\u8FD4\u56DE\u8BBE\u7F6E",
@@ -1345,16 +1402,25 @@ var CcSwitchProviderSettingsView = class {
     });
     const heading = section.createDiv({ cls: "ccswitch-heading" });
     const headingCopy = heading.createDiv();
-    headingCopy.createEl("h2", { text: "\u4F9B\u5E94\u5546 (cc-switch)" });
+    headingCopy.createEl("h2", { text: "\u4F9B\u5E94\u5546" });
     headingCopy.createEl("p", {
-      text: "\u53EA\u8BFB\u89E3\u6790\u672C\u673A cc-switch \u6570\u636E\u5E93\uFF0C\u9009\u62E9 VideoMemo \u4EFB\u52A1\u4F7F\u7528\u7684 API \u4F9B\u5E94\u5546\u3002"
+      text: "\u9009\u62E9 cc-switch\u3001\u9879\u76EE\u73AF\u5883\u914D\u7F6E\uFF0C\u6216\u6DFB\u52A0 OpenAI-compatible \u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u3002"
     });
     const sourceSwitch = heading.createDiv({
       cls: "ccswitch-source-switch",
       attr: { "aria-label": "\u4F9B\u5E94\u5546\u914D\u7F6E\u6765\u6E90" }
     });
-    this.renderSourceButton(sourceSwitch, "cc-switch", "database", "ccswitch");
-    this.renderSourceButton(sourceSwitch, "\u73AF\u5883\u914D\u7F6E", "file-cog", "environment");
+    this.renderSourceButton(sourceSwitch, "cc-switch", "database", "ccswitch", source);
+    this.renderSourceButton(sourceSwitch, "\u73AF\u5883\u914D\u7F6E", "file-cog", "environment", source);
+    this.renderSourceButton(sourceSwitch, "\u81EA\u5B9A\u4E49", "sliders-horizontal", "custom", source);
+    if (source === "custom") {
+      this.renderCustomProvider(section, settings);
+      return false;
+    }
+    if (source === "environment") {
+      this.renderEnvironmentSource(section, settings);
+      return false;
+    }
     this.renderDatabaseCard(section, response?.dbPath ?? null, loadError);
     if (!response) {
       this.renderError(section, loadError);
@@ -1406,8 +1472,8 @@ var CcSwitchProviderSettingsView = class {
     copy.createEl("h2", { text: provider.name });
     copy.createDiv({ text: `${provider.appType} \u4F9B\u5E94\u5546\u914D\u7F6E` });
   }
-  renderSourceButton(parent, label, iconName, source) {
-    const active = this.options.getSettings().providerSource === source;
+  renderSourceButton(parent, label, iconName, source, visibleSource) {
+    const active = visibleSource === source;
     const button = parent.createEl("button", {
       cls: `ccswitch-source-button${active ? " is-active" : ""}`,
       attr: { type: "button", "aria-pressed": String(active) }
@@ -1415,10 +1481,293 @@ var CcSwitchProviderSettingsView = class {
     icon(button, iconName);
     button.createSpan({ text: label });
     button.addEventListener("click", () => {
+      this.selectedProviderId = "";
+      this.visibleSource = source;
+      if (source === "custom") {
+        this.customDraft = this.customDraft ?? this.customDraftFromSettings();
+        this.options.rerender();
+        return;
+      }
       void this.options.updateSettings({ providerSource: source }).then(() => {
         this.options.rerender();
       });
     });
+  }
+  customDraftFromSettings() {
+    const settings = this.options.getSettings();
+    return {
+      name: settings.customProviderName,
+      baseUrl: settings.customProviderBaseUrl,
+      apiKey: settings.customProviderApiKey,
+      model: settings.customProviderModel,
+      apiFormat: settings.customProviderApiFormat
+    };
+  }
+  renderEnvironmentSource(parent, settings) {
+    const card = parent.createDiv({ cls: "ccswitch-custom-card" });
+    const title = card.createDiv({ cls: "ccswitch-section-title" });
+    icon(title, "file-cog");
+    title.createSpan({ text: "\u9879\u76EE\u73AF\u5883\u914D\u7F6E" });
+    card.createDiv({
+      cls: "ccswitch-custom-hint",
+      text: "\u4F7F\u7528\u9879\u76EE .env\u3001\u7CFB\u7EDF\u73AF\u5883\u53D8\u91CF\u6216 ~/.grok/config.toml \u4E2D\u7684 API \u914D\u7F6E\u3002"
+    });
+    const form = card.createDiv({ cls: "ccswitch-custom-form" });
+    this.renderCustomTextField(form, {
+      label: "\u6A21\u578B\u8986\u76D6\uFF08\u53EF\u9009\uFF09",
+      value: settings.model,
+      placeholder: "\u7559\u7A7A\u65F6\u4F7F\u7528\u73AF\u5883\u914D\u7F6E\u4E2D\u7684\u6A21\u578B",
+      onInput: (value) => {
+        void this.options.updateSettings({ model: value.trim() });
+      }
+    });
+    const actions = card.createDiv({ cls: "ccswitch-custom-action-row" });
+    actionButton(actions, {
+      label: settings.providerSource === "environment" ? "\u6B63\u5728\u4F7F\u7528" : "\u4F7F\u7528\u73AF\u5883\u914D\u7F6E",
+      icon: settings.providerSource === "environment" ? "check" : "play",
+      primary: settings.providerSource !== "environment",
+      disabled: settings.providerSource === "environment",
+      onClick: () => {
+        void this.options.updateSettings({ providerSource: "environment" }).then(() => {
+          this.options.rerender();
+        });
+      }
+    });
+  }
+  renderCustomProvider(parent, settings) {
+    const draft = this.customDraft ??= this.customDraftFromSettings();
+    const card = parent.createDiv({ cls: "ccswitch-custom-card" });
+    const heading = card.createDiv({ cls: "ccswitch-custom-heading" });
+    const title = heading.createDiv({ cls: "ccswitch-section-title" });
+    icon(title, "sliders-horizontal");
+    title.createSpan({ text: "OpenAI-compatible \u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546" });
+    if (settings.providerSource === "custom") badge(heading, "\u4F7F\u7528\u4E2D", "accent");
+    card.createDiv({
+      cls: "ccswitch-custom-hint",
+      text: "\u586B\u5199 API \u6839\u5730\u5740\uFF08\u4F8B\u5982 https://example.com/v1\uFF09\uFF0C\u4E0D\u8981\u586B\u5199 /chat/completions\u3002"
+    });
+    const form = card.createDiv({ cls: "ccswitch-custom-form" });
+    const status = form.createDiv({
+      cls: `ccswitch-custom-status${this.customModelState?.status === "loaded" ? " is-success" : this.customModelState?.status === "error" ? " is-error" : ""}`,
+      text: this.customStatusText()
+    });
+    const invalidateTest = () => {
+      this.customModelState = null;
+      status.className = "ccswitch-custom-status is-warning";
+      status.setText("\u914D\u7F6E\u5DF2\u66F4\u6539\uFF0C\u8BF7\u91CD\u65B0\u6D4B\u8BD5\u8FDE\u63A5");
+    };
+    this.renderCustomTextField(form, {
+      label: "\u4F9B\u5E94\u5546\u540D\u79F0",
+      value: draft.name,
+      placeholder: "\u4F8B\u5982\uFF1AMy API",
+      onInput: (value) => {
+        draft.name = value;
+      }
+    });
+    this.renderCustomTextField(form, {
+      label: "API Base URL",
+      value: draft.baseUrl,
+      placeholder: "https://example.com/v1",
+      onInput: (value) => {
+        draft.baseUrl = value;
+        invalidateTest();
+      }
+    });
+    if (this.isUntrustedHttpUrl(draft.baseUrl)) {
+      form.createDiv({
+        cls: "ccswitch-custom-status is-warning",
+        text: "\u8FDC\u7A0B HTTP \u4F1A\u660E\u6587\u4F20\u8F93 API Key\uFF1B\u8BF7\u6539\u7528\u53EF\u4FE1 HTTPS\u3002localhost HTTP \u4E0D\u53D7\u6B64\u9650\u5236\u3002"
+      });
+    }
+    const keyField = form.createDiv({ cls: "ccswitch-custom-field" });
+    keyField.createEl("label", { text: "API Key" });
+    const keyRow = keyField.createDiv({ cls: "ccswitch-custom-password-row" });
+    const keyInput = keyRow.createEl("input", {
+      attr: {
+        type: "password",
+        value: draft.apiKey,
+        placeholder: "sk-...",
+        autocomplete: "off",
+        "aria-label": "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546 API Key"
+      }
+    });
+    keyInput.addEventListener("input", () => {
+      draft.apiKey = keyInput.value;
+      invalidateTest();
+    });
+    const reveal = keyRow.createEl("button", {
+      cls: "clickable-icon ccswitch-custom-key-toggle",
+      attr: { type: "button", "aria-label": "\u663E\u793A API Key", "aria-pressed": "false" }
+    });
+    (0, import_obsidian3.setIcon)(reveal, "eye");
+    reveal.addEventListener("click", () => {
+      const visible = keyInput.type === "text";
+      keyInput.type = visible ? "password" : "text";
+      reveal.setAttribute("aria-label", visible ? "\u663E\u793A API Key" : "\u9690\u85CF API Key");
+      reveal.setAttribute("aria-pressed", String(!visible));
+      (0, import_obsidian3.setIcon)(reveal, visible ? "eye" : "eye-off");
+    });
+    keyField.createDiv({
+      cls: "ccswitch-custom-hint is-warning",
+      text: "API Key \u4F1A\u660E\u6587\u4FDD\u5B58\u5728\u5F53\u524D Vault \u7684\u63D2\u4EF6 data.json\uFF1B\u4E0D\u4F1A\u5199\u5165\u65E5\u5FD7\u6216\u547D\u4EE4\u884C\u3002"
+    });
+    const formatField = form.createDiv({ cls: "ccswitch-custom-field" });
+    formatField.createEl("label", { text: "API \u683C\u5F0F" });
+    const formatSelect = formatField.createEl("select", {
+      cls: "dropdown ccswitch-custom-select",
+      attr: { "aria-label": "\u9009\u62E9 API \u683C\u5F0F" }
+    });
+    formatSelect.createEl("option", { value: "chat_completions", text: "Chat Completions" });
+    formatSelect.createEl("option", { value: "responses", text: "Responses API" });
+    formatSelect.value = draft.apiFormat;
+    formatSelect.addEventListener("change", () => {
+      draft.apiFormat = formatSelect.value === "responses" ? "responses" : "chat_completions";
+      invalidateTest();
+    });
+    const modelField = form.createDiv({ cls: "ccswitch-custom-field" });
+    modelField.createEl("label", { text: "\u6A21\u578B" });
+    const modelRow = modelField.createDiv({ cls: "ccswitch-custom-model-controls" });
+    const modelInput = modelRow.createEl("input", {
+      attr: {
+        type: "text",
+        value: draft.model,
+        placeholder: "\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0",
+        list: "video-memo-custom-models",
+        "aria-label": "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u6A21\u578B"
+      }
+    });
+    const modelList = modelRow.createEl("datalist", { attr: { id: "video-memo-custom-models" } });
+    for (const model of this.customModelState?.models ?? []) {
+      modelList.createEl("option", { value: model });
+    }
+    modelInput.addEventListener("input", () => {
+      draft.model = modelInput.value;
+    });
+    const actions = card.createDiv({ cls: "ccswitch-custom-action-row" });
+    const loading = this.customModelState?.status === "loading";
+    actionButton(actions, {
+      label: loading ? "\u8FDE\u63A5\u4E2D..." : "\u5237\u65B0\u6A21\u578B",
+      icon: loading ? "loader-circle" : "refresh-cw",
+      disabled: loading,
+      onClick: () => this.startCustomModelRequest(false)
+    });
+    actionButton(actions, {
+      label: loading ? "\u6D4B\u8BD5\u4E2D..." : "\u6D4B\u8BD5\u8FDE\u63A5",
+      icon: loading ? "loader-circle" : "plug-zap",
+      disabled: loading,
+      onClick: () => this.startCustomModelRequest(true)
+    });
+    actionButton(actions, {
+      label: settings.providerSource === "custom" ? "\u4FDD\u5B58\u5E76\u7EE7\u7EED\u4F7F\u7528" : "\u4F7F\u7528\u6B64\u914D\u7F6E",
+      icon: "check",
+      primary: true,
+      onClick: () => this.activateCustomProvider()
+    });
+  }
+  renderCustomTextField(parent, options) {
+    const field = parent.createDiv({ cls: "ccswitch-custom-field" });
+    field.createEl("label", { text: options.label });
+    const input = field.createEl("input", {
+      attr: { type: "text", value: options.value, placeholder: options.placeholder }
+    });
+    input.addEventListener("input", () => options.onInput(input.value));
+  }
+  isUntrustedHttpUrl(value) {
+    try {
+      const url = new URL(value.trim());
+      if (url.protocol !== "http:") return false;
+      return !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname.toLowerCase());
+    } catch {
+      return false;
+    }
+  }
+  customStatusText() {
+    const state = this.customModelState;
+    if (!state) return "\u5C1A\u672A\u6D4B\u8BD5\u8FDE\u63A5";
+    if (state.status === "loading") return "\u6B63\u5728\u9A8C\u8BC1 URL\u3001Key \u5E76\u83B7\u53D6\u6A21\u578B\u5217\u8868...";
+    if (state.status === "error") return `\u8FDE\u63A5\u5931\u8D25\uFF1A${state.error}`;
+    return `\u8FDE\u63A5\u6210\u529F\uFF1A\u53D1\u73B0 ${state.models.length} \u4E2A\u6A21\u578B`;
+  }
+  startCustomModelRequest(showNotice) {
+    const draft = this.customDraft ??= this.customDraftFromSettings();
+    if (!draft.baseUrl.trim() || !draft.apiKey.trim()) {
+      const message = "\u8BF7\u5148\u586B\u5199 API Base URL \u548C API Key";
+      this.customModelState = {
+        requestId: ++this.modelRequestId,
+        status: "error",
+        models: [],
+        endpoint: "",
+        error: message
+      };
+      if (showNotice) new import_obsidian3.Notice(message);
+      this.options.rerender();
+      return;
+    }
+    const requestId = ++this.modelRequestId;
+    this.customModelState = {
+      requestId,
+      status: "loading",
+      models: [],
+      endpoint: "",
+      error: ""
+    };
+    this.options.rerender();
+    void fetchOpenAiCompatibleModels({
+      baseUrl: draft.baseUrl,
+      apiKey: draft.apiKey
+    }).then((response) => {
+      if (this.customModelState?.requestId !== requestId) return;
+      this.customModelState = {
+        requestId,
+        status: "loaded",
+        models: response.models,
+        endpoint: response.endpoint,
+        error: ""
+      };
+      if (!draft.model && response.models.length > 0) draft.model = response.models[0];
+      if (showNotice) new import_obsidian3.Notice(`\u8FDE\u63A5\u6210\u529F\uFF0C\u53D1\u73B0 ${response.models.length} \u4E2A\u6A21\u578B`);
+      this.options.rerender();
+    }).catch((error) => {
+      if (this.customModelState?.requestId !== requestId) return;
+      const message = error instanceof Error ? error.message : String(error);
+      this.customModelState = {
+        requestId,
+        status: "error",
+        models: [],
+        endpoint: "",
+        error: message
+      };
+      if (showNotice) new import_obsidian3.Notice(`\u8FDE\u63A5\u5931\u8D25
+${message}`, 8e3);
+      this.options.rerender();
+    });
+  }
+  activateCustomProvider() {
+    const draft = this.customDraft ??= this.customDraftFromSettings();
+    try {
+      const name = draft.name.trim();
+      const baseUrl = normalizeOpenAiBaseUrl(draft.baseUrl);
+      const apiKey = draft.apiKey.trim();
+      const model = draft.model.trim();
+      if (!name) throw new Error("\u8BF7\u586B\u5199\u4F9B\u5E94\u5546\u540D\u79F0");
+      if (!apiKey) throw new Error("\u8BF7\u586B\u5199 API Key");
+      if (!model) throw new Error("\u8BF7\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0");
+      void this.options.updateSettings({
+        providerSource: "custom",
+        customProviderName: name,
+        customProviderBaseUrl: baseUrl,
+        customProviderApiKey: apiKey,
+        customProviderModel: model,
+        customProviderApiFormat: draft.apiFormat
+      }).then(() => {
+        this.visibleSource = "custom";
+        this.customDraft = this.customDraftFromSettings();
+        new import_obsidian3.Notice("\u5DF2\u542F\u7528\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546");
+        this.options.rerender();
+      });
+    } catch (error) {
+      new import_obsidian3.Notice(error instanceof Error ? error.message : String(error), 8e3);
+    }
   }
   renderDatabaseCard(parent, connectedPath, loadError) {
     const settings = this.options.getSettings();
@@ -2061,6 +2410,7 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
   activeProcess = null;
   statusEl = null;
   stderrTail = "";
+  activeProviderSecret = "";
   taskState = null;
   progressModal = null;
   async onload() {
@@ -2165,6 +2515,13 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     app.setting.open();
     app.setting.openTabById(this.manifest.id);
   }
+  redactProviderSecrets(value) {
+    let redacted = value;
+    if (this.activeProviderSecret) {
+      redacted = redacted.replaceAll(this.activeProviderSecret, "***");
+    }
+    return redacted.replace(/(authorization\s*:\s*bearer\s+)[^\s,;]+/gi, "$1***").replace(/((?:api[_-]?key|token|secret|password)\s*[=:]\s*)[^\s,;]+/gi, "$1***");
+  }
   setStatus(text) {
     this.statusEl?.setText(text);
     this.statusEl?.toggleClass("is-clickable", this.taskState !== null);
@@ -2200,8 +2557,9 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     let selectedModel = this.settings.model.trim();
     let providerBaseUrl = "";
     let providerLabel = selectedModel ? `\u73AF\u5883\u914D\u7F6E \xB7 ${selectedModel}` : "\u73AF\u5883\u914D\u7F6E";
-    if (this.settings.providerSource === "ccswitch") {
-      try {
+    this.activeProviderSecret = "";
+    try {
+      if (this.settings.providerSource === "ccswitch") {
         const runtime = resolveCcSwitchProviderRuntime({
           dbPath: this.settings.ccSwitchDbPath,
           appType: this.settings.ccSwitchAppType,
@@ -2211,17 +2569,34 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
         providerBaseUrl = runtime.baseUrl;
         selectedModel = selectedModel || runtime.model || "";
         providerLabel = selectedModel ? `${runtime.name} \xB7 ${selectedModel}` : `${runtime.name} \xB7 \u9ED8\u8BA4\u6A21\u578B`;
+        this.activeProviderSecret = runtime.apiKey;
         engineEnv.LLM_API_KEY = runtime.apiKey;
         engineEnv.LLM_BASE_URL = runtime.baseUrl;
         engineEnv.LLM_API_FORMAT = runtime.apiFormat || "chat_completions";
         if (!selectedModel) delete engineEnv.LLM_MODEL;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        new import_obsidian6.Notice(`\u65E0\u6CD5\u4F7F\u7528 cc-switch \u4F9B\u5E94\u5546
-${message}`, 8e3);
-        this.openPluginSettings();
-        return;
+      } else if (this.settings.providerSource === "custom") {
+        const name = this.settings.customProviderName.trim();
+        const apiKey = this.settings.customProviderApiKey.trim();
+        selectedModel = this.settings.customProviderModel.trim();
+        providerBaseUrl = normalizeOpenAiBaseUrl(this.settings.customProviderBaseUrl);
+        if (!name) throw new Error("\u8BF7\u586B\u5199\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u540D\u79F0");
+        if (!apiKey) throw new Error("\u8BF7\u586B\u5199\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546 API Key");
+        if (!selectedModel) throw new Error("\u8BF7\u9009\u62E9\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u6A21\u578B");
+        providerLabel = `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 ${selectedModel}`;
+        this.activeProviderSecret = apiKey;
+        engineEnv.LLM_API_KEY = apiKey;
+        engineEnv.LLM_BASE_URL = providerBaseUrl;
+        engineEnv.LLM_API_FORMAT = this.settings.customProviderApiFormat;
+        delete engineEnv.LLM_MODEL;
       }
+    } catch (error) {
+      const message = this.redactProviderSecrets(
+        error instanceof Error ? error.message : String(error)
+      );
+      new import_obsidian6.Notice(`\u65E0\u6CD5\u4F7F\u7528\u6240\u9009\u4F9B\u5E94\u5546
+${message}`, 8e3);
+      this.openPluginSettings();
+      return;
     }
     const args = [
       pipelinePath,
@@ -2264,10 +2639,12 @@ ${message}`, 8e3);
       this.handleOutputLine(line, vaultPath);
     });
     child.stderr.on("data", (chunk) => {
-      this.stderrTail = (this.stderrTail + chunk.toString("utf8")).slice(-4e3);
+      this.stderrTail = this.redactProviderSecrets(
+        (this.stderrTail + chunk.toString("utf8")).slice(-4e3)
+      );
     });
     child.on("error", (error) => {
-      this.finishTask(false, `\u65E0\u6CD5\u542F\u52A8 Python: ${error.message}`);
+      this.finishTask(false, this.redactProviderSecrets(`\u65E0\u6CD5\u542F\u52A8 Python: ${error.message}`));
     });
     child.on("close", (code) => {
       if (this.activeProcess !== child) return;
