@@ -193,6 +193,22 @@ HTTPS，localhost 可使用 HTTP。
 `LICENSE`、`NOTICE`、`obsidian-plugin/LICENSE`、`obsidian-plugin/COPYRIGHT.md` 和
 `THIRD-PARTY-NOTICES.md`。
 
+## 旧笔记迁移
+
+旧版本把笔记导出到 `<vault>/Video Memos/`，文件名带 `_<来源ID>` 后缀。需要按新规则
+（`<vault>/<主题>/<AI 标题>.md`）归档时，使用 `tools/migrate_obsidian_notes.py`：
+
+```powershell
+# 先看计划（dry-run），LLM 按笔记内容识别主题；也可 --no-llm 或 --topic "Git" 指定
+python tools/migrate_obsidian_notes.py --vault "D:\ProgramData\ObsidianData"
+
+# 确认无误后执行
+python tools/migrate_obsidian_notes.py --vault "D:\ProgramData\ObsidianData" --apply
+```
+
+脚本会把笔记和附件一起搬入主题文件夹、改写 `![[...]]` 嵌入、补写来源标记，并在 Vault 根目录
+或主题名冲突时自动加后缀，绝不覆盖已有文件；备份和无法识别的文件保留在 `Video Memos/` 并报告。
+
 ## 开发与发布
 
 ```powershell
