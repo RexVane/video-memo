@@ -110,13 +110,16 @@ export class VideoMemoSettingTab extends PluginSettingTab {
       text: "输出",
     });
     new Setting(containerEl)
-      .setName("Vault 目标文件夹")
-      .setDesc("Vault 内的相对路径；不允许绝对路径或 .. 片段")
+      .setName("Vault 目标文件夹（可选）")
+      .setDesc("留空：按视频内容自动创建主题文件夹（如 Git/）；填写：固定放到 Vault 内该相对路径（不允许绝对路径或 .. 片段）")
       .addText((text) =>
-        text.setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
-          this.plugin.settings.targetFolder = sanitizeTargetFolder(value);
-          await this.persist();
-        }),
+        text
+          .setPlaceholder("留空 = 自动按主题归类")
+          .setValue(this.plugin.settings.targetFolder)
+          .onChange(async (value) => {
+            this.plugin.settings.targetFolder = sanitizeTargetFolder(value);
+            await this.persist();
+          }),
       );
     new Setting(containerEl)
       .setName("完成后清理媒体")

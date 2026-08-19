@@ -224,7 +224,7 @@ class VideoMemoApp(ctk.CTk):
         ctk.CTkEntry(
             vault_input,
             textvariable=self.obsidian_vault_var,
-            placeholder_text="选择 Vault 后，笔记会导出到 Video Memos",
+            placeholder_text="选择 Vault 后，笔记会按视频内容自动归入主题文件夹（如 Git）",
         ).pack(side="left", fill="x", expand=True)
         ctk.CTkButton(
             vault_input,

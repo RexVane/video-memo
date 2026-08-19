@@ -21,7 +21,7 @@ export const DEFAULT_SETTINGS: VideoMemoSettings = {
   model: "",
   customProviders: [],
   activeCustomProviderId: "",
-  targetFolder: "Video Memos",
+  targetFolder: "",
   cleanupMedia: false,
 };
 

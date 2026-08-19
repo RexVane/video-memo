@@ -14,22 +14,98 @@ from download import AUDIO_EXTS, VIDEO_EXTS, DownloadResult
 
 _GENERATED_START = "<!-- videomemo:generated:start -->"
 _GENERATED_END = "<!-- videomemo:generated:end -->"
+_SOURCE_MARKER = "<!-- videomemo:source:{source_id} -->"
+_HEAD_SCAN_BYTES = 8 * 1024
 
 
 def _safe_name(value: str, limit: int = 80) -> str:
     cleaned = re.sub(r"[^\w\u4e00-\u9fff\- ]+", "_", value)
-    cleaned = re.sub(r"[ _]+", "_", cleaned).strip("_.")
+    cleaned = re.sub(r"[ _]+", " ", cleaned).strip(" .")
     return cleaned[:limit] or "videomemo"
 
 
 def _vault_folder(vault: Path, folder: str) -> Path:
-    relative = Path(folder.strip() or "Video Memos")
+    relative = Path(folder.strip() or ".")
     if relative.is_absolute() or ".." in relative.parts:
         raise ValueError("Obsidian 目标文件夹必须是 Vault 内的相对路径")
     target = (vault / relative).resolve()
     if not target.is_relative_to(vault):
         raise ValueError("Obsidian 目标文件夹不能超出 Vault")
     return target
+
+
+def _topic_folder_name(topic: str | None) -> str:
+    """Sanitize the AI-derived topic into a vault-relative folder name."""
+    value = (topic or "").strip()
+    if not value:
+        return ""
+    cleaned = _safe_name(value, limit=40)
+    return "" if cleaned == "videomemo" else cleaned
+
+
+def _resolve_destination(
+    vault: Path,
+    folder: str | None,
+    topic: str | None,
+) -> Path:
+    """Pick the note folder: an explicit folder wins, then the content topic.
+
+    With neither set, notes go directly under the vault root.
+    """
+    explicit = (folder or "").strip()
+    if explicit:
+        return _vault_folder(vault, explicit)
+    topic_name = _topic_folder_name(topic)
+    if topic_name:
+        return _vault_folder(vault, topic_name)
+    return vault
+
+
+def _read_head(path: Path, size: int = _HEAD_SCAN_BYTES) -> str:
+    with path.open("r", encoding="utf-8", errors="replace") as handle:
+        return handle.read(size)
+
+
+def _note_for_source(
+    destination: Path,
+    preferred: Path,
+    source_id: str,
+) -> Path:
+    """Resolve which note file this export should (re)write.
+
+    The preferred name is the AI-generated title. A file with that exact name
+    that already carries our source marker is the same note (title unchanged).
+    Otherwise a same-source note may live under an older AI title, so the
+    destination is scanned for the marker; adopting it keeps user annotations
+    in place. Only when the preferred name is taken by a foreign note do we
+    fall back to a source-id-suffixed name so nothing is ever clobbered.
+    """
+    marker = _SOURCE_MARKER.format(source_id=source_id)
+    if preferred.is_file():
+        try:
+            if marker in _read_head(preferred):
+                return preferred
+        except OSError:
+            pass
+    latest: Path | None = None
+    latest_mtime = 0.0
+    for candidate in destination.glob("*.md"):
+        if candidate == preferred:
+            continue
+        try:
+            if marker not in _read_head(candidate):
+                continue
+        except OSError:
+            continue
+        mtime = candidate.stat().st_mtime
+        if latest is None or mtime > latest_mtime:
+            latest = candidate
+            latest_mtime = mtime
+    if latest is not None:
+        return latest
+    if preferred.is_file():
+        return preferred.with_name(f"{preferred.stem}_{source_id}.md")
+    return preferred
 
 
 def _media_type(metadata: DownloadResult, has_frames: bool) -> str:
@@ -48,8 +124,9 @@ def export_to_vault(
     metadata: DownloadResult,
     vault_path: Path,
     *,
-    folder: str = "Video Memos",
+    folder: str | None = None,
     note_title: str | None = None,
+    topic: str | None = None,
 ) -> Path:
     vault = vault_path.expanduser().resolve()
     if not vault.is_dir():
@@ -57,23 +134,13 @@ def export_to_vault(
     if not summary_path.is_file():
         raise FileNotFoundError(f"总结文件不存在: {summary_path}")
 
-    destination = _vault_folder(vault, folder)
+    destination = _resolve_destination(vault, folder, topic)
     destination.mkdir(parents=True, exist_ok=True)
     source_id = hashlib.sha256(metadata.webpage_url.encode("utf-8")).hexdigest()[:8]
     name_source = note_title.strip() if note_title and note_title.strip() else metadata.title
-    note_stem = f"{_safe_name(name_source)}_{source_id}"
+    note_stem = _safe_name(name_source)
     preferred_note_path = destination / f"{note_stem}.md"
-    existing_notes = sorted(
-        destination.glob(f"*_{source_id}.md"),
-        key=lambda path: path.stat().st_mtime,
-        reverse=True,
-    )
-    note_path = (
-        preferred_note_path
-        if preferred_note_path.is_file() or not existing_notes
-        else existing_notes[0]
-    )
-    note_stem = note_path.stem
+    note_path = _note_for_source(destination, preferred_note_path, source_id)
 
     frame_links: list[str] = []
     source_frames = sorted(summary_path.parent.glob("frames/frame_*.jpg"))
@@ -120,7 +187,8 @@ def export_to_vault(
     if frame_links:
         frames_section = "\n\n## 关键帧\n\n" + "\n\n".join(frame_links)
     generated = body + frames_section + "\n"
-    wrapped = f"{_GENERATED_START}\n{generated}{_GENERATED_END}\n"
+    source_marker = _SOURCE_MARKER.format(source_id=source_id)
+    wrapped = f"{_GENERATED_START}\n{source_marker}\n{generated}{_GENERATED_END}\n"
     final_text = frontmatter + wrapped
     if note_path.is_file():
         previous = note_path.read_text(encoding="utf-8")

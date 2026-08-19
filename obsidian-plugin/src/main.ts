@@ -49,6 +49,12 @@ export default class VideoMemoPlugin extends Plugin {
   async onload(): Promise<void> {
     const stored = (await this.loadData()) as Partial<VideoMemoSettings> | null;
     this.settings = normalizeSettings(stored);
+    // The legacy default folder is gone: an empty target folder now means the
+    // engine derives a topic folder from the video content itself. Migrate the
+    // old default value once so existing installs get the new behavior too.
+    if (this.settings.targetFolder === "Video Memos") {
+      this.settings.targetFolder = "";
+    }
     if (!stored || JSON.stringify(stored) !== JSON.stringify(this.settings)) {
       await this.saveData(this.settings);
     }

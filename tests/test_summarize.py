@@ -354,6 +354,59 @@ class SummarizeTests(unittest.TestCase):
         self.assertTrue(body.startswith("## section"))
         self.assertNotIn("<<<TITLE>>>", body)
 
+    def test_split_front_tags_extracts_topic_and_title(self) -> None:
+        raw = (
+            "<<<TOPIC>>>Git<<<END>>>\n"
+            "<<<TITLE>>>版本控制核心概念<<<END>>>\n\n## 一眼看懂\ncontent"
+        )
+        body, title, topic = summarize._split_front_tags(raw, "Fallback")
+        self.assertEqual(title, "版本控制核心概念")
+        self.assertEqual(topic, "Git")
+        self.assertTrue(body.startswith("## 一眼看懂"))
+        self.assertNotIn("<<<TITLE>>>", body)
+        self.assertNotIn("<<<TOPIC>>>", body)
+
+    def test_split_front_tags_handles_reversed_order(self) -> None:
+        raw = "<<<TITLE>>>标题甲<<<END>>>\n<<<TOPIC>>>Python<<<END>>>\n正文"
+        body, title, topic = summarize._split_front_tags(raw, "Fallback")
+        self.assertEqual(title, "标题甲")
+        self.assertEqual(topic, "Python")
+        self.assertTrue(body.startswith("正文"))
+
+    @patch("summarize._generate_chapter_notes")
+    @patch("summarize._client")
+    def test_topic_extracted_from_tag(self, client_factory, generate_chapters) -> None:
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content=(
+                            "<<<TOPIC>>>Git<<<END>>>\n"
+                            "<<<TITLE>>>版本控制核心概念<<<END>>>\n"
+                            "## 一眼看懂\n精华"
+                        )
+                    )
+                )
+            ]
+        )
+        client_factory.return_value = client
+        generate_chapters.return_value = []
+
+        with patch.dict(os.environ, {"LLM_API_FORMAT": ""}):
+            result = summarize.summarize(
+                title="原始视频标题",
+                url="https://example.test",
+                uploader="",
+                description="",
+                transcript="transcript",
+                model="test-model",
+            )
+
+        self.assertEqual(result.topic, "Git")
+        self.assertEqual(result.note_title, "版本控制核心概念")
+        self.assertTrue(result.body.startswith("## 一眼看懂"))
+
     def test_uses_anthropic_messages_aliases(self) -> None:
         for value in ("anthropic_messages", "anthropic", "messages", "anthropic-messages"):
             with patch.dict(os.environ, {"LLM_API_FORMAT": value}):

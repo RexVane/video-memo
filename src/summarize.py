@@ -70,29 +70,53 @@ def _redact(text: object, limit: int = 240) -> str:
     return value[:limit]
 
 TITLE_TAG_OPEN = "<<<TITLE>>>"
+TOPIC_TAG_OPEN = "<<<TOPIC>>>"
 TITLE_TAG_CLOSE = "<<<END>>>"
 
 
 @dataclass
 class SummarizeResult:
-    """Summary body plus a short content-derived title for note naming."""
+    """Summary body plus short content-derived title and topic for note naming."""
 
     body: str
     note_title: str
+    topic: str = ""
+
+
+def _split_front_tags(
+    raw: str,
+    fallback_title: str,
+    fallback_topic: str = "",
+) -> tuple[str, str, str]:
+    """Extract <<<TOPIC>>>/<<<TITLE>>> prefixes; return (body, title, topic).
+
+    Each tag is matched independently and stripped from the body, so the model
+    may emit them in either order without breaking extraction.
+    """
+    body = raw
+    title = fallback_title
+    topic = fallback_topic
+    for tag, field in ((TOPIC_TAG_OPEN, "topic"), (TITLE_TAG_OPEN, "title")):
+        match = re.search(
+            re.escape(tag) + r"\s*(.+?)\s*" + re.escape(TITLE_TAG_CLOSE),
+            body,
+            flags=re.DOTALL,
+        )
+        if not match:
+            continue
+        value = match.group(1).strip()
+        if field == "title":
+            title = value or fallback_title
+        else:
+            topic = value or fallback_topic
+        body = (body[: match.start()] + body[match.end():]).strip()
+    return body, title, topic
 
 
 def _split_title(raw: str, fallback: str) -> tuple[str, str]:
     """Extract a <<<TITLE>>>...<<<END>>> prefix; return (body, title)."""
-    match = re.search(
-        re.escape(TITLE_TAG_OPEN) + r"\s*(.+?)\s*" + re.escape(TITLE_TAG_CLOSE),
-        raw,
-        flags=re.DOTALL,
-    )
-    if not match:
-        return raw, fallback
-    title = match.group(1).strip()
-    body = (raw[: match.start()] + raw[match.end():]).strip()
-    return body, title or fallback
+    body, title, _ = _split_front_tags(raw, fallback)
+    return body, title
 
 
 def require_api_key(
@@ -720,8 +744,10 @@ def summarize(
             "不要生成练习题、自测题、学习任务或泛泛的课程评价。"
             "输出适合 Obsidian 阅读的 Markdown，不输出 YAML frontmatter、一级标题或重复的视频标题。"
             f"使用{output_language}输出。"
-            "在回复最开头用 <<<TITLE>>> 和 <<<END>>> 包裹一个 10-30 字的简短笔记标题，"
-            "概括材料核心主题，不要包含'笔记'或'总结'字样。"
+            "在回复最开头先用 <<<TOPIC>>> 和 <<<END>>> 包裹一个 2-6 字的主题分类词"
+            "（如：Git、Python、Obsidian、效率工具、外语学习），用于 Obsidian 归档目录命名，"
+            "必须具体准确、能代表整份材料；再紧接着用 <<<TITLE>>> 和 <<<END>>> 包裹一个 "
+            "10-30 字的简短笔记标题，概括材料核心主题，不要包含'笔记'或'总结'字样。"
         )
 
         user_text = f"""请基于以下材料，提炼一份一眼能抓住精华、需要时又能继续深挖的知识笔记。
@@ -840,9 +866,9 @@ def summarize(
         overview = _response_text(resp)
         if on_progress:
             on_progress("精华知识笔记生成完成", 1.0)
-        overview, note_title = _split_title(overview, title)
+        overview, note_title, topic = _split_front_tags(overview, title)
         if not chapter_notes:
-            return SummarizeResult(body=overview, note_title=note_title)
+            return SummarizeResult(body=overview, note_title=note_title, topic=topic)
         chapter_callouts = [_chapter_callout(note) for note in chapter_notes]
         body = (
             f"{overview}\n\n## 逐章参考笔记\n\n"
@@ -850,7 +876,7 @@ def summarize(
             "> 以下内容按原视频时间顺序保留，用于追溯上下文；默认折叠，不影响精华阅读。\n\n"
             + "\n\n".join(callout for callout in chapter_callouts if callout)
         )
-        return SummarizeResult(body=body, note_title=note_title)
+        return SummarizeResult(body=body, note_title=note_title, topic=topic)
     finally:
         if http_client:
             http_client.close()

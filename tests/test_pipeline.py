@@ -336,7 +336,7 @@ class PipelineTests(unittest.TestCase):
             llm_model="test-model",
             api_base_url=None,
             obsidian_vault=None,
-            obsidian_folder="Video Memos",
+            obsidian_folder="",
             on_progress=None,
         )
 

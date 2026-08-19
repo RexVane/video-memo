@@ -125,7 +125,7 @@ python src/pipeline.py --version
 | `--cookies-from-browser BROWSER` | 从浏览器读取 Cookie |
 | `--cookies FILE` | 使用导出的 `cookies.txt` |
 | `--obsidian-vault DIR` | 导出报告和关键帧到 Vault |
-| `--obsidian-folder DIR` | Vault 目标文件夹，默认 `Video Memos` |
+| `--obsidian-folder DIR` | Vault 内目标文件夹；留空则按 AI 生成的主题自动创建子目录（如 `Git/`） |
 | `--regenerate DIR` | 从已有运行目录重新生成报告 |
 | `--version` | 显示引擎版本 |
 | `--json-progress` | 插件内部使用的结构化进度输出 |

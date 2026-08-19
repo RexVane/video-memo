@@ -1311,7 +1311,7 @@ var DEFAULT_SETTINGS = {
   model: "",
   customProviders: [],
   activeCustomProviderId: "",
-  targetFolder: "Video Memos",
+  targetFolder: "",
   cleanupMedia: false
 };
 function normalizeCustomProviders(raw) {
@@ -2502,8 +2502,8 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
       cls: "video-memo-settings-section-label",
       text: "\u8F93\u51FA"
     });
-    new import_obsidian4.Setting(containerEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939").setDesc("Vault \u5185\u7684\u76F8\u5BF9\u8DEF\u5F84\uFF1B\u4E0D\u5141\u8BB8\u7EDD\u5BF9\u8DEF\u5F84\u6216 .. \u7247\u6BB5").addText(
-      (text) => text.setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
+    new import_obsidian4.Setting(containerEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939\uFF08\u53EF\u9009\uFF09").setDesc("\u7559\u7A7A\uFF1A\u6309\u89C6\u9891\u5185\u5BB9\u81EA\u52A8\u521B\u5EFA\u4E3B\u9898\u6587\u4EF6\u5939\uFF08\u5982 Git/\uFF09\uFF1B\u586B\u5199\uFF1A\u56FA\u5B9A\u653E\u5230 Vault \u5185\u8BE5\u76F8\u5BF9\u8DEF\u5F84\uFF08\u4E0D\u5141\u8BB8\u7EDD\u5BF9\u8DEF\u5F84\u6216 .. \u7247\u6BB5\uFF09").addText(
+      (text) => text.setPlaceholder("\u7559\u7A7A = \u81EA\u52A8\u6309\u4E3B\u9898\u5F52\u7C7B").setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
         this.plugin.settings.targetFolder = sanitizeTargetFolder(value);
         await this.persist();
       })
@@ -2743,6 +2743,9 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
   async onload() {
     const stored = await this.loadData();
     this.settings = normalizeSettings(stored);
+    if (this.settings.targetFolder === "Video Memos") {
+      this.settings.targetFolder = "";
+    }
     if (!stored || JSON.stringify(stored) !== JSON.stringify(this.settings)) {
       await this.saveData(this.settings);
     }

@@ -431,7 +431,7 @@ def regenerate_report(
     api_key: str | None = None,
     api_base_url: str | None = None,
     obsidian_vault: Path | None = None,
-    obsidian_folder: str = "Video Memos",
+    obsidian_folder: str = "",
     on_progress: ProgressCb | None = None,
     cancel_event: CancellationSignal | None = None,
 ) -> Path:
@@ -481,6 +481,7 @@ def regenerate_report(
             obsidian_vault,
             folder=obsidian_folder,
             note_title=summary.note_title,
+            topic=summary.topic,
         )
         progress(f"OBSIDIAN_NOTE={note_path}", 0.98)
     _update_run_info(work_dir, "run_status", "complete")
@@ -503,7 +504,7 @@ def run(
     cookies_file: Path | None = None,
     cleanup_media: bool = False,
     obsidian_vault: Path | None = None,
-    obsidian_folder: str = "Video Memos",
+    obsidian_folder: str = "",
     on_progress: ProgressCb | None = None,
     cancel_event: CancellationSignal | None = None,
 ) -> Path:
@@ -775,6 +776,7 @@ def run(
             obsidian_vault,
             folder=obsidian_folder,
             note_title=summary.note_title,
+            topic=summary.topic,
         )
         progress(f"OBSIDIAN_NOTE={note_path}", 0.95)
     if cleanup_media:
@@ -856,8 +858,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--obsidian-folder",
-        default="Video Memos",
-        help="Vault 内的目标文件夹（默认 Video Memos）",
+        default="",
+        help="Vault 内的目标文件夹；留空则根据视频内容自动创建主题子目录（默认留空）",
     )
     p.add_argument(
         "--json-progress",
