@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { isAbsolute, join, relative } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   FileSystemAdapter,
   Notice,
@@ -17,6 +17,7 @@ import {
   DEFAULT_SETTINGS,
   describeProviderSelection,
   normalizeSettings,
+  sanitizeTargetFolder,
   type VideoMemoSettings,
 } from "./settings";
 import { VideoMemoSettingTab } from "./settings-tab";
@@ -201,6 +202,11 @@ export default class VideoMemoPlugin extends Plugin {
     }
     const vaultPath = this.vaultPath();
     if (!vaultPath) return;
+    const sourceValue = sourceArgs[0] === "--regenerate" ? sourceArgs[1] : sourceArgs[0];
+    if (!sourceValue || (sourceArgs[0] !== "--regenerate" && sourceValue.startsWith("-"))) {
+      new Notice("输入不能以连字符开头，请选择有效 URL 或本地文件");
+      return;
+    }
 
     const engineEnv: NodeJS.ProcessEnv = { ...process.env, PYTHONUTF8: "1" };
     let selectedModel = this.settings.model.trim();
@@ -257,7 +263,7 @@ export default class VideoMemoPlugin extends Plugin {
       "--obsidian-vault",
       vaultPath,
       "--obsidian-folder",
-      this.settings.targetFolder.trim() || DEFAULT_SETTINGS.targetFolder,
+      sanitizeTargetFolder(this.settings.targetFolder),
       "--json-progress",
     ];
     if (selectedModel) args.push("--llm-model", selectedModel);
@@ -286,13 +292,18 @@ export default class VideoMemoPlugin extends Plugin {
       env: engineEnv,
       shell: false,
       windowsHide: true,
+      // Own a process group on POSIX so cancellation can reach yt-dlp/ffmpeg
+      // grandchildren; Windows uses `taskkill /T` for the same effect.
+      detached: process.platform !== "win32",
     });
     this.activeProcess = child;
     this.openProgressModal();
 
-    createInterface({ input: child.stdout }).on("line", (line) => {
+    const outputLines = createInterface({ input: child.stdout });
+    outputLines.on("line", (line) => {
       this.handleOutputLine(line, vaultPath);
     });
+    child.once("close", () => outputLines.close());
     child.stderr.on("data", (chunk: Buffer) => {
       this.stderrTail = this.redactProviderSecrets(
         (this.stderrTail + chunk.toString("utf8")).slice(-4000),
@@ -318,6 +329,9 @@ export default class VideoMemoPlugin extends Plugin {
     try {
       const event = JSON.parse(line.slice(marker + EVENT_PREFIX.length)) as EngineEvent;
       const state = this.taskState;
+      // Output buffered before the kill lands must not resurrect a task the
+      // user already cancelled (or overwrite a terminal error).
+      if (state && state.status !== "running") return;
       if (event.type === "progress" && state) {
         state.progress = Math.max(0, Math.min(1, event.progress ?? 0));
         const message = (event.message ?? "").replace(/\s+$/, "");
@@ -336,7 +350,17 @@ export default class VideoMemoPlugin extends Plugin {
         this.progressModal?.refresh();
       } else if (event.type === "artifact" && event.kind === "obsidian_note") {
         if (state && event.path && isAbsolute(event.path)) {
-          state.notePath = normalizePath(relative(vaultPath, event.path));
+          const absoluteNote = resolve(event.path);
+          const absoluteVault = resolve(vaultPath);
+          const vaultRelative = relative(absoluteVault, absoluteNote);
+          if (
+            vaultRelative &&
+            vaultRelative !== ".." &&
+            !vaultRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
+            !isAbsolute(vaultRelative)
+          ) {
+            state.notePath = normalizePath(vaultRelative);
+          }
         }
       }
     } catch {
@@ -394,6 +418,14 @@ export default class VideoMemoPlugin extends Plugin {
       spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
         windowsHide: true,
       });
+    } else if (child.pid) {
+      // Signal the whole process group; a bare child.kill() would leave
+      // yt-dlp/ffmpeg running and still writing into the output directory.
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
     } else {
       child.kill("SIGTERM");
     }

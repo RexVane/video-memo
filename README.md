@@ -10,14 +10,14 @@ VideoMemo 将视频链接、本地视频或录音转换成可检索的学习笔�
     ↓
 字幕优先；没有字幕时使用本地 faster-whisper 转写
     ↓
-视频可抽取关键帧（可用 --no-vision 跳过）
+视频可按时间均匀抽取画面采样帧（可用 --no-vision 跳过）
     ↓
 OpenAI-compatible 多模态模型生成结构化学习笔记
     ↓
-Markdown 报告 + 可选 Obsidian 笔记和关键帧附件
+Markdown 报告 + 可选 Obsidian 笔记和画面采样帧附件
 ```
 
-- 远程 URL：使用 `yt-dlp` 解析站点、格式、字幕和 Cookie；普通 HTTP 直链会尝试经过严格校验的 Range 多连接下载，失败自动回退到 `yt-dlp`。
+- 远程 URL：使用 `yt-dlp` 解析站点、格式、字幕和 Cookie；普通 HTTP 直链会尝试经过严格校验的 Range 多连接下载，失败自动回退到 `yt-dlp`。为防止恶意页面借此访问内网，快速下载默认拒绝私有、环回和链路本地地址；确需访问可信的本地媒体服务时可设置 `VIDEOMEMO_ALLOW_PRIVATE_URLS=1`。
 - 本地媒体：直接读取原文件，不复制、不删除原文件；视频默认仍可抽帧，音频自动跳过画面分析。
 - 字幕：优先使用平台手工字幕，其次自动字幕，最后回退到本地 Whisper。
 - 隐私：转写在本地完成；摘要请求会把转写和选定关键帧发送到你配置的模型服务。
@@ -143,7 +143,7 @@ python src/pipeline.py --version
 - `summary.md`：扫描优先的结构化学习笔记；
 - `transcript.txt`：带时间戳的转写；
 - `audio.wav`：用于 ASR 的中间音轨；
-- `frames/`：启用视觉且输入含视频时的关键帧；
+- `frames/`：启用视觉且输入含视频时按时间均匀抽取的画面采样帧；
 - `source.*`：远程下载的媒体；本地输入不会复制该文件；
 - `info.json`：元数据、缓存和完成状态。
 

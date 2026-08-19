@@ -7,8 +7,10 @@ import datetime as _datetime
 import email.utils
 import hashlib
 import http.client
+import ipaddress
 import os
 import re
+import socket
 import threading
 import time
 import urllib.error
@@ -21,7 +23,6 @@ from typing import Callable, Mapping, TypeVar
 
 from cancellation import CancellationRequested, CancellationSignal, check_cancelled
 
-
 ProgressCallback = Callable[[int, int | None], None]
 
 MAX_CONNECTIONS = 4
@@ -32,6 +33,11 @@ MAX_RETRY_AFTER = 30.0
 WAIT_INTERVAL = 0.05
 CHUNK_SIZE = 64 * 1024
 MIN_PART_SIZE = 64 * 1024
+# A staging file older than this is assumed to be crash debris, not a live run.
+STALE_PART_SECONDS = 6 * 60 * 60
+# Abort a transfer that has made no forward progress for this long. The socket
+# timeout alone cannot catch a server that dribbles one byte per timeout window.
+IDLE_TIMEOUT = 120.0
 
 _RETRYABLE_STATUS = {408, 429, 500, 502, 503, 504}
 _SENSITIVE_HEADERS = {"authorization", "cookie", "proxy-authorization"}
@@ -153,6 +159,43 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 _T = TypeVar("_T")
 
 
+def _is_blocked_address(host: str) -> bool:
+    """Return True when a hostname resolves only into non-public address space.
+
+    Media URLs come from third-party pages, so an attacker-controlled page could
+    otherwise point this transport at a router admin panel, a LAN service, or a
+    cloud metadata endpoint (169.254.169.254). Set ``VIDEOMEMO_ALLOW_PRIVATE_URLS=1``
+    to allow it deliberately (self-hosted media, localhost testing).
+    """
+    if os.environ.get("VIDEOMEMO_ALLOW_PRIVATE_URLS", "").strip() in {"1", "true", "TRUE"}:
+        return False
+    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    try:
+        candidates.append(ipaddress.ip_address(host))
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+        except OSError:
+            # Let the actual request surface the resolution failure instead.
+            return False
+        for info in infos:
+            try:
+                candidates.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                continue
+    if not candidates:
+        return False
+    return all(
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+        or address.is_multicast
+        or address.is_unspecified
+        for address in candidates
+    )
+
+
 def _validate_http_url(url: str) -> None:
     try:
         parsed = urllib.parse.urlsplit(url)
@@ -163,6 +206,11 @@ def _validate_http_url(url: str) -> None:
         raise ValueError("Only http:// and https:// URLs are supported")
     if parsed.username is not None or parsed.password is not None:
         raise ValueError("Credentials embedded in URLs are not supported")
+    if _is_blocked_address(parsed.hostname):
+        raise ValueError(
+            "Refusing to fetch a private, loopback, or link-local address; "
+            "set VIDEOMEMO_ALLOW_PRIVATE_URLS=1 to override"
+        )
     del port  # Accessing it above validates malformed port values.
 
 
@@ -362,6 +410,8 @@ def _stream_response(
 ) -> int:
     actual = 0
     read_chunk = getattr(response, "read1", response.read)
+    window_started = time.monotonic()
+    window_bytes = 0
     while True:
         _check_transfer_stop(cancel_event, stop_event)
         try:
@@ -372,6 +422,15 @@ def _stream_response(
         if not chunk:
             break
         actual += len(chunk)
+        window_bytes += len(chunk)
+        elapsed = time.monotonic() - window_started
+        if elapsed >= IDLE_TIMEOUT:
+            if window_bytes < CHUNK_SIZE:
+                raise _RetryableNetworkError(
+                    "Transfer stalled below the minimum sustained progress rate"
+                )
+            window_started = time.monotonic()
+            window_bytes = 0
         if expected is not None and actual > expected:
             raise DownloadValidationError(
                 f"Response exceeded expected length {expected}"
@@ -676,6 +735,14 @@ def _single_attempt(
                 "GET Content-Length disagrees with probed total"
             )
         target = expected if expected is not None else declared
+        if target is None:
+            # With no Content-Length and no probed total, a dropped connection is
+            # indistinguishable from a clean EOF, so a truncated file would be
+            # committed with a valid checksum. Refuse and let the caller fall
+            # back to yt-dlp, which handles close-delimited bodies.
+            raise DownloadValidationError(
+                "Server provided no transfer size; cannot verify completeness"
+            )
         digest = hashlib.sha256()
         final_url = _final_url(response)
         if _origin(url) != _origin(final_url):
@@ -751,8 +818,22 @@ def _merge_segments(
 
 
 def _reserve_file(path: Path) -> None:
-    with path.open("xb"):
-        pass
+    try:
+        with path.open("xb"):
+            pass
+    except FileExistsError:
+        # A hard crash (power loss, kill -9) leaves staging files behind. Without
+        # this recovery the exclusive create fails forever and the caller
+        # silently falls back to the slow transport for good.
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            raise
+        if age < STALE_PART_SECONDS:
+            raise
+        path.unlink(missing_ok=True)
+        with path.open("xb"):
+            pass
 
 
 def _remove_files(paths: list[Path]) -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import http.server
+import os
 import re
 import sys
 import tempfile
@@ -11,13 +12,13 @@ import time
 import unittest
 from contextlib import contextmanager
 from pathlib import Path
+from unittest.mock import patch
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 import fast_download  # noqa: E402
 from cancellation import CancellationRequested  # noqa: E402
-
 
 DATA = bytes(range(256)) * 2048
 _RANGE_RE = re.compile(r"bytes=([0-9]+)-([0-9]+)\Z")
@@ -192,6 +193,17 @@ def _serve(mode: str = "normal"):
 
 
 class FastDownloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # The scenario server listens on 127.0.0.1, which the SSRF guard blocks
+        # by default. These tests target loopback deliberately, so they opt in
+        # through the documented escape hatch.
+        patcher = patch.dict(
+            os.environ,
+            {"VIDEOMEMO_ALLOW_PRIVATE_URLS": "1"},
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def assert_no_staging_files(self, directory: Path, destination: Path) -> None:
         self.assertEqual(
             [path.name for path in directory.iterdir() if path != destination],
@@ -407,6 +419,24 @@ class FastDownloadTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 fast_download.download_http("file:///etc/passwd", destination)
             self.assertFalse(destination.exists())
+
+    def test_private_addresses_require_explicit_opt_in(self) -> None:
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VIDEOMEMO_ALLOW_PRIVATE_URLS", None)
+            with self.assertRaisesRegex(ValueError, "private, loopback"):
+                fast_download._validate_http_url("http://127.0.0.1/media.mp4")
+
+    def test_stale_part_file_is_reclaimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            part = Path(tmp) / "video.part"
+            part.write_bytes(b"stale")
+            stale_time = time.time() - fast_download.STALE_PART_SECONDS - 1
+            os.utime(part, (stale_time, stale_time))
+
+            fast_download._reserve_file(part)
+
+            self.assertTrue(part.exists())
+            self.assertEqual(part.stat().st_size, 0)
 
 
 if __name__ == "__main__":

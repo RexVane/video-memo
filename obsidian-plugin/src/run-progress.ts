@@ -171,7 +171,8 @@ export class RunProgressModal extends Modal {
     copyButton.addEventListener("click", () => {
       void navigator.clipboard
         .writeText(state.errorDetail)
-        .then(() => new Notice("错误信息已复制"));
+        .then(() => new Notice("错误信息已复制"))
+        .catch(() => new Notice("复制失败，请手动选择错误信息"));
     });
     box.createEl("pre", { text: state.errorDetail.trim() });
   }

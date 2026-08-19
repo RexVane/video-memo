@@ -44,7 +44,10 @@ class RunCommandTests(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0)
-        self.assertEqual(calls, [(["echo", "hi"], {"capture_output": True})])
+        self.assertEqual(
+            calls,
+            [(["echo", "hi"], {"capture_output": True, "timeout": 3600.0})],
+        )
 
     def test_pre_set_event_raises_before_running(self) -> None:
         event = threading.Event()

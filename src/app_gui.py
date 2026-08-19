@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import queue
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from tkinter import filedialog
@@ -62,6 +64,8 @@ class VideoMemoApp(ctk.CTk):
         self._last_summary_path: Path | None = None
         self._busy = False
         self._closing = False
+        self._close_deadline: float | None = None
+        self._log_lines = 0
         try:
             self._initial_llm_config: LLMConfig | None = resolve_llm_config(LLM_DEFAULT)
         except (RuntimeError, ValueError):
@@ -257,6 +261,17 @@ class VideoMemoApp(ctk.CTk):
             command=self._on_regenerate,
         )
         self.regenerate_btn.pack(side="left", padx=(10, 0))
+        self.cancel_btn = ctk.CTkButton(
+            actions,
+            text="取消任务",
+            height=40,
+            width=100,
+            fg_color=("#b42318", "#da3633"),
+            hover_color=("#8f1d14", "#b62324"),
+            command=self._cancel_current_task,
+            state="disabled",
+        )
+        self.cancel_btn.pack(side="left", padx=(10, 0))
         ctk.CTkButton(
             actions,
             text="打开结果文件夹",
@@ -298,7 +313,15 @@ class VideoMemoApp(ctk.CTk):
         self._log("桌面程序已启动。")
 
     def _log(self, text: str) -> None:
+        lines = (text if text.endswith("\n") else text + "\n").count("\n")
         self.log_box.insert("end", text if text.endswith("\n") else text + "\n")
+        self._log_lines += lines
+        # Tk text widgets slow down sharply with unbounded content. Keep the
+        # newest 2,000 lines, which is ample for diagnosis even on long runs.
+        if self._log_lines > 2_000:
+            drop = self._log_lines - 2_000
+            self.log_box.delete("1.0", f"{drop + 1}.0")
+            self._log_lines = 2_000
         self.log_box.see("end")
 
     def _set_summary(self, text: str) -> None:
@@ -371,6 +394,7 @@ class VideoMemoApp(ctk.CTk):
         self._cancel_event = cancel_event
         self.start_btn.configure(state="disabled", text="处理中…")
         self.regenerate_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal", text="取消任务")
         self.copy_btn.configure(state="disabled")
         self.progress.set(0.02)
         self.status_var.set("处理中…")
@@ -445,6 +469,7 @@ class VideoMemoApp(ctk.CTk):
         self._cancel_event = cancel_event
         self.start_btn.configure(state="disabled")
         self.regenerate_btn.configure(state="disabled", text="生成中…")
+        self.cancel_btn.configure(state="normal", text="取消任务")
         self.copy_btn.configure(state="disabled")
         self.progress.set(0.02)
         self.status_var.set("正在重新生成报告…")
@@ -474,14 +499,17 @@ class VideoMemoApp(ctk.CTk):
     def _drain_queue(self) -> None:
         try:
             while True:
-                item = self._msg_q.get_nowait()
+                try:
+                    item = self._msg_q.get_nowait()
+                except queue.Empty:
+                    break
                 kind = item[0]
                 if kind == "progress":
                     _, msg, pct = item
                     self._log(msg)
                     try:
                         self.progress.set(max(0.0, min(1.0, float(pct))))
-                    except Exception:
+                    except (TypeError, ValueError):
                         pass
                     line = msg.strip().splitlines()[-1] if msg.strip() else ""
                     if line:
@@ -497,6 +525,7 @@ class VideoMemoApp(ctk.CTk):
                     self._cancel_event = None
                     self.start_btn.configure(state="normal", text="开始总结")
                     self.regenerate_btn.configure(state="normal", text="重新生成")
+                    self.cancel_btn.configure(state="disabled", text="取消任务")
                     self.copy_btn.configure(state="normal")
                 elif kind == "error":
                     _, err, tb = item
@@ -505,20 +534,29 @@ class VideoMemoApp(ctk.CTk):
                     self.progress.set(0)
                     self.status_var.set(
                         "已取消"
-                        if self._closing and "已取消" in err
+                        if (self._closing or self._cancel_event) and "已取消" in err
                         else "失败，请看「运行日志」或总结页错误信息"
                     )
                     self._busy = False
                     self._cancel_event = None
                     self.start_btn.configure(state="normal", text="开始总结")
                     self.regenerate_btn.configure(state="normal", text="重新生成")
+                    self.cancel_btn.configure(state="disabled", text="取消任务")
                     self.copy_btn.configure(state="normal")
-        except queue.Empty:
-            pass
+        except Exception as error:
+            # A destroyed widget or malformed queue item must not kill the only
+            # Tk `after` pump and freeze all future status updates.
+            try:
+                self.status_var.set(f"界面更新失败: {error}")
+            except Exception:
+                return
         if self._closing and not self._worker_alive():
             self.destroy()
             return
-        self.after(120, self._drain_queue)
+        try:
+            self.after(120, self._drain_queue)
+        except Exception:
+            pass
 
     def _open_output(self) -> None:
         target = self._last_summary_path.parent if self._last_summary_path else OUTPUT_DIR
@@ -541,13 +579,21 @@ class VideoMemoApp(ctk.CTk):
         self.clipboard_append(text)
         self.status_var.set("已复制总结到剪贴板")
 
+    def _cancel_current_task(self) -> None:
+        if not self._busy or self._cancel_event is None:
+            return
+        self._cancel_event.set()
+        self.cancel_btn.configure(state="disabled", text="取消中…")
+        self.status_var.set("正在取消任务；当前网络请求或模型分块结束后退出…")
+        self._log("用户请求取消任务。")
+
     def _on_close(self) -> None:
         if not self._busy:
             self.destroy()
             return
         self._closing = True
-        if self._cancel_event:
-            self._cancel_event.set()
+        self._close_deadline = time.monotonic() + 5.0
+        self._cancel_current_task()
         self.status_var.set("正在取消任务，等待后台进程退出…")
         self.start_btn.configure(state="disabled", text="取消中…")
         self.regenerate_btn.configure(state="disabled", text="取消中…")
@@ -560,15 +606,24 @@ class VideoMemoApp(ctk.CTk):
         if not self._worker_alive():
             self.destroy()
             return
+        # Model downloads and some native inference calls cannot be interrupted.
+        # The worker is daemonized, so after a short grace period closing the GUI
+        # is safer than trapping the user behind an unresponsive window.
+        if self._close_deadline is not None and time.monotonic() >= self._close_deadline:
+            self.destroy()
+            return
         self.after(100, self._close_when_idle)
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = sys.argv[1:] if argv is None else argv
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("url", nargs="?")
+    parser.add_argument("--auto-start", action="store_true")
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     app = VideoMemoApp()
-    if args:
-        app.url_var.set(args[0])
-    if "--auto-start" in args[1:]:
+    if args.url:
+        app.url_var.set(args.url)
+    if args.auto_start:
         app.after(300, app._on_start)
     app.mainloop()
 

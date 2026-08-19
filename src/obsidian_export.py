@@ -12,6 +12,9 @@ from urllib.parse import unquote, urlparse
 
 from download import AUDIO_EXTS, VIDEO_EXTS, DownloadResult
 
+_GENERATED_START = "<!-- videomemo:generated:start -->"
+_GENERATED_END = "<!-- videomemo:generated:end -->"
+
 
 def _safe_name(value: str, limit: int = 80) -> str:
     cleaned = re.sub(r"[^\w\u4e00-\u9fff\- ]+", "_", value)
@@ -75,7 +78,10 @@ def export_to_vault(
     frame_links: list[str] = []
     source_frames = sorted(summary_path.parent.glob("frames/frame_*.jpg"))
     if source_frames:
-        asset_dir = destination / "assets" / note_stem
+        # Use the fixed-length source id rather than the human title. Apart from
+        # avoiding Windows MAX_PATH failures in deep vaults, attachments keep a
+        # stable location when the AI-generated note title changes.
+        asset_dir = destination / "assets" / source_id
         asset_dir.mkdir(parents=True, exist_ok=True)
         for stale in asset_dir.glob("frame_*.jpg"):
             stale.unlink()
@@ -113,8 +119,24 @@ def export_to_vault(
     frames_section = ""
     if frame_links:
         frames_section = "\n\n## 关键帧\n\n" + "\n\n".join(frame_links)
-    note_path.write_text(
-        frontmatter + body + frames_section + "\n",
-        encoding="utf-8",
-    )
+    generated = body + frames_section + "\n"
+    wrapped = f"{_GENERATED_START}\n{generated}{_GENERATED_END}\n"
+    final_text = frontmatter + wrapped
+    if note_path.is_file():
+        previous = note_path.read_text(encoding="utf-8")
+        start = previous.find(_GENERATED_START)
+        end = previous.find(_GENERATED_END)
+        if start >= 0 and end >= start:
+            end += len(_GENERATED_END)
+            final_text = previous[:start] + wrapped.rstrip("\n") + previous[end:]
+        else:
+            # A legacy VideoMemo note may contain user annotations with no
+            # generated-region markers. Preserve it as a timestamped backup
+            # before the one-time migration instead of silently clobbering it.
+            stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup = note_path.with_name(f"{note_path.stem}.backup-{stamp}.md")
+            shutil.copy2(note_path, backup)
+    temporary = note_path.with_suffix(".md.tmp")
+    temporary.write_text(final_text, encoding="utf-8")
+    temporary.replace(note_path)
     return note_path

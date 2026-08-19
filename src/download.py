@@ -23,7 +23,6 @@ from cancellation import (
     run_command,
 )
 
-
 FORMAT_SELECTOR = "bv*[height<=1080]+ba/bv*+ba/b"
 
 VIDEO_EXTS = {
@@ -248,10 +247,15 @@ def _select_subtitle_track(
         if automatic:
             return automatic, True
 
-    if manual_codes:
-        return sorted(manual_codes, key=str.casefold)[0], False
-    if automatic_codes:
-        return sorted(automatic_codes, key=str.casefold)[0], True
+    # If yt-dlp reports neither an audio language nor a user preference, one
+    # manual track is a reasonable default even when unrelated auto-caption
+    # tracks also exist. Choosing alphabetically from several manual tracks (or
+    # several auto tracks) is not: it silently changes the note's language, so
+    # let Whisper auto-detect instead.
+    if len(manual_codes) == 1:
+        return manual_codes[0], False
+    if not manual_codes and len(automatic_codes) == 1:
+        return automatic_codes[0], True
     return None
 
 
@@ -411,11 +415,15 @@ def probe(
     except json.JSONDecodeError as exc:
         raise RuntimeError("yt-dlp 返回了无效的视频信息") from exc
 
-    duration = info.get("duration")
+    duration_value = info.get("duration")
+    try:
+        duration = float(duration_value) if duration_value is not None else None
+    except (TypeError, ValueError):
+        duration = None
     subtitle = _select_subtitle_track(info, preferred_language)
     return VideoMetadata(
         title=info.get("title") or "untitled",
-        duration=float(duration) if duration is not None else None,
+        duration=duration,
         webpage_url=info.get("webpage_url") or url,
         description=(info.get("description") or "")[:2000],
         uploader=info.get("uploader") or info.get("channel") or "",
@@ -714,8 +722,6 @@ def _commit_progressive(
     check_cancelled(cancel_event)
     if not staged.is_file() or staged.stat().st_size <= 0:
         raise RuntimeError("高速下载完成但媒体文件为空")
-    if final.exists():
-        raise FileExistsError(f"目标媒体文件已存在: {final}")
     os.replace(staged, final)
     created_paths.append(final)
     if not final.is_file() or final.stat().st_size <= 0:
@@ -781,8 +787,6 @@ def _commit_separate(
     if merge.returncode != 0 or not merged.is_file() or merged.stat().st_size <= 0:
         raise RuntimeError(f"合并音视频失败:\n{(merge.stderr or '')[-2000:]}")
     check_cancelled(cancel_event)
-    if final.exists():
-        raise FileExistsError(f"目标媒体文件已存在: {final}")
     os.replace(merged, final)
     created_paths.append(final)
     if not final.is_file() or final.stat().st_size <= 0:
@@ -931,11 +935,27 @@ def download(
             subtitle_args,
             cookie,
         )
-        full_result = _run_yt_dlp(
-            full_command,
-            cookies_from_browser=cookies_from_browser,
-            cancel_event=cancel_event,
-        )
+        try:
+            full_result = _run_yt_dlp(
+                full_command,
+                cookies_from_browser=cookies_from_browser,
+                cancel_event=cancel_event,
+            )
+        except CancellationRequested:
+            # yt-dlp leaves fragments and `.part` files when its process tree is
+            # killed. They are never selected as media, but otherwise accumulate
+            # forever and consume substantial disk space.
+            for partial in work_dir.glob("source*.part"):
+                try:
+                    partial.unlink()
+                except OSError:
+                    pass
+            for fragment in work_dir.glob("source*.part-Frag*"):
+                try:
+                    fragment.unlink()
+                except OSError:
+                    pass
+            raise
         source = _stdout_media_path(full_result.stdout or "", work_dir)
         if source is None:
             new_media = [

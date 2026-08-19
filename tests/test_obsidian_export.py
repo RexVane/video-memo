@@ -123,8 +123,24 @@ class ObsidianExportTests(unittest.TestCase):
             )
 
             self.assertEqual(first, second)
-            self.assertEqual(len(list(vault.rglob("*.md"))), 1)
+            # The first export migrates no legacy file; the second updates only
+            # VideoMemo's generated region in place.
+            self.assertEqual(len(list(vault.rglob("*.backup-*.md"))), 0)
             self.assertIn("updated", second.read_text(encoding="utf-8"))
+
+            content = second.read_text(encoding="utf-8")
+            content += "\n## 我的批注\n不要删除这段。\n"
+            second.write_text(content, encoding="utf-8")
+            summary.write_text("third", encoding="utf-8")
+            third = export_to_vault(
+                summary,
+                DownloadResult(title="Updated title", **common),
+                vault,
+            )
+            final = third.read_text(encoding="utf-8")
+            self.assertIn("third", final)
+            self.assertIn("## 我的批注", final)
+            self.assertIn("不要删除这段。", final)
 
 
 if __name__ == "__main__":

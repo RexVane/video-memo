@@ -1257,7 +1257,7 @@ var RunProgressModal = class extends import_obsidian2.Modal {
     });
     (0, import_obsidian2.setIcon)(copyButton, "copy");
     copyButton.addEventListener("click", () => {
-      void navigator.clipboard.writeText(state.errorDetail).then(() => new import_obsidian2.Notice("\u9519\u8BEF\u4FE1\u606F\u5DF2\u590D\u5236"));
+      void navigator.clipboard.writeText(state.errorDetail).then(() => new import_obsidian2.Notice("\u9519\u8BEF\u4FE1\u606F\u5DF2\u590D\u5236")).catch(() => new import_obsidian2.Notice("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u9519\u8BEF\u4FE1\u606F"));
     });
     box.createEl("pre", { text: state.errorDetail.trim() });
   }
@@ -1314,17 +1314,6 @@ var DEFAULT_SETTINGS = {
   targetFolder: "Video Memos",
   cleanupMedia: false
 };
-function normalizeApiFormat2(value) {
-  if (typeof value !== "string") return "chat_completions";
-  const normalized = value.trim().toLowerCase().replace("-", "_");
-  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
-    return "anthropic_messages";
-  }
-  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
-    return "responses";
-  }
-  return "chat_completions";
-}
 function normalizeCustomProviders(raw) {
   if (!Array.isArray(raw)) return [];
   const seen = /* @__PURE__ */ new Set();
@@ -1336,13 +1325,19 @@ function normalizeCustomProviders(raw) {
     const baseUrl = typeof item.baseUrl === "string" ? item.baseUrl : "";
     const apiKey = typeof item.apiKey === "string" ? item.apiKey : "";
     const model = typeof item.model === "string" ? item.model : "";
-    const apiFormat = normalizeApiFormat2(item.apiFormat);
+    const apiFormat = normalizeApiFormat(item.apiFormat);
     let id = typeof item.id === "string" && item.id ? item.id : `cp_${Date.now()}_${index}`;
     if (seen.has(id)) id = `${id}_${index}`;
     seen.add(id);
     result.push({ id, name, baseUrl, apiKey, model, apiFormat });
   }
   return result;
+}
+function sanitizeTargetFolder(value) {
+  if (typeof value !== "string") return DEFAULT_SETTINGS.targetFolder;
+  const cleaned = value.trim().replace(/[\\]+/g, "/").split("/").map((part) => part.trim()).filter((part) => part && part !== "." && part !== "..").join("/");
+  if (!cleaned || /^[A-Za-z]:/.test(cleaned)) return DEFAULT_SETTINGS.targetFolder;
+  return cleaned;
 }
 function normalizeSettings(stored) {
   const stringValue = (value, fallback) => typeof value === "string" ? value : fallback;
@@ -1359,7 +1354,7 @@ function normalizeSettings(stored) {
       baseUrl: legacyBaseUrl,
       apiKey: legacyApiKey,
       model: typeof legacy?.customProviderModel === "string" ? legacy.customProviderModel : "",
-      apiFormat: normalizeApiFormat2(legacy?.customProviderApiFormat)
+      apiFormat: normalizeApiFormat(legacy?.customProviderApiFormat)
     };
     customProviders = [migrated];
   }
@@ -1381,7 +1376,7 @@ function normalizeSettings(stored) {
     model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
     customProviders,
     activeCustomProviderId: activeIdIsValid ? activeCustomProviderId : customProviders[0]?.id ?? "",
-    targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
+    targetFolder: sanitizeTargetFolder(stored?.targetFolder),
     cleanupMedia: typeof stored?.cleanupMedia === "boolean" ? stored.cleanupMedia : DEFAULT_SETTINGS.cleanupMedia
   };
 }
@@ -1817,7 +1812,7 @@ var CcSwitchProviderSettingsView = class {
     formatSelect.createEl("option", { value: "responses", text: "Responses API" });
     formatSelect.value = draft.apiFormat;
     formatSelect.addEventListener("change", () => {
-      draft.apiFormat = formatSelect.value === "responses" ? "responses" : "chat_completions";
+      draft.apiFormat = normalizeApiFormat(formatSelect.value);
       invalidateTest();
     });
     const modelField = form.createDiv({ cls: "ccswitch-custom-field" });
@@ -2312,7 +2307,7 @@ ${message}`, 8e3);
     });
     (0, import_obsidian3.setIcon)(copyButton, "copy");
     copyButton.addEventListener("click", () => {
-      void navigator.clipboard.writeText(content).then(() => new import_obsidian3.Notice("\u914D\u7F6E\u5DF2\u590D\u5236"));
+      void navigator.clipboard.writeText(content).then(() => new import_obsidian3.Notice("\u914D\u7F6E\u5DF2\u590D\u5236")).catch(() => new import_obsidian3.Notice("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u914D\u7F6E"));
     });
     configSection.createEl("pre", { cls: "ccswitch-code-block", text: content });
   }
@@ -2432,9 +2427,12 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
     this.providerView = new CcSwitchProviderSettingsView({
       app,
       getSettings: () => this.plugin.settings,
+      // Never reject: dozens of call sites chain .then() without .catch(), so a
+      // failed write must surface as a Notice here instead of becoming an
+      // unhandled rejection that also skips the caller's re-render.
       updateSettings: async (patch) => {
         Object.assign(this.plugin.settings, patch);
-        await this.plugin.saveData(this.plugin.settings);
+        await this.persist();
       },
       rerender: () => this.display(),
       onBack: () => {
@@ -2442,6 +2440,14 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
         this.display();
       }
     });
+  }
+  async persist() {
+    try {
+      await this.plugin.saveData(this.plugin.settings);
+    } catch (error) {
+      console.error("VideoMemo: failed to save settings", error);
+      new import_obsidian4.Notice("VideoMemo \u8BBE\u7F6E\u4FDD\u5B58\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5 Vault \u662F\u5426\u53EF\u5199");
+    }
   }
   display() {
     const { containerEl } = this;
@@ -2483,7 +2489,7 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
     new import_obsidian4.Setting(containerEl).setName("\u9879\u76EE\u76EE\u5F55").setDesc("\u5305\u542B src/pipeline.py \u7684 VideoMemo \u76EE\u5F55").addText(
       (text) => text.setPlaceholder("D:\\AIApp\\video-memo").setValue(this.plugin.settings.projectPath).onChange(async (value) => {
         this.plugin.settings.projectPath = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
+        await this.persist();
         this.display();
       })
     );
@@ -2496,16 +2502,16 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
       cls: "video-memo-settings-section-label",
       text: "\u8F93\u51FA"
     });
-    new import_obsidian4.Setting(containerEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939").addText(
+    new import_obsidian4.Setting(containerEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939").setDesc("Vault \u5185\u7684\u76F8\u5BF9\u8DEF\u5F84\uFF1B\u4E0D\u5141\u8BB8\u7EDD\u5BF9\u8DEF\u5F84\u6216 .. \u7247\u6BB5").addText(
       (text) => text.setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
-        this.plugin.settings.targetFolder = value.trim();
-        await this.plugin.saveData(this.plugin.settings);
+        this.plugin.settings.targetFolder = sanitizeTargetFolder(value);
+        await this.persist();
       })
     );
     new import_obsidian4.Setting(containerEl).setName("\u5B8C\u6210\u540E\u6E05\u7406\u5A92\u4F53").setDesc("\u5220\u9664\u8F93\u51FA\u76EE\u5F55\u4E2D\u7684\u4E0B\u8F7D\u5A92\u4F53\u548C\u97F3\u8F68\uFF0C\u4E0D\u5220\u9664\u672C\u5730\u8F93\u5165\u6587\u4EF6").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.cleanupMedia).onChange(async (value) => {
         this.plugin.settings.cleanupMedia = value;
-        await this.plugin.saveData(this.plugin.settings);
+        await this.persist();
       })
     );
   }
@@ -2874,6 +2880,11 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     }
     const vaultPath = this.vaultPath();
     if (!vaultPath) return;
+    const sourceValue = sourceArgs[0] === "--regenerate" ? sourceArgs[1] : sourceArgs[0];
+    if (!sourceValue || sourceArgs[0] !== "--regenerate" && sourceValue.startsWith("-")) {
+      new import_obsidian6.Notice("\u8F93\u5165\u4E0D\u80FD\u4EE5\u8FDE\u5B57\u7B26\u5F00\u5934\uFF0C\u8BF7\u9009\u62E9\u6709\u6548 URL \u6216\u672C\u5730\u6587\u4EF6");
+      return;
+    }
     const engineEnv = { ...process.env, PYTHONUTF8: "1" };
     let selectedModel = this.settings.model.trim();
     let providerBaseUrl = "";
@@ -2927,7 +2938,7 @@ ${message}`, 8e3);
       "--obsidian-vault",
       vaultPath,
       "--obsidian-folder",
-      this.settings.targetFolder.trim() || DEFAULT_SETTINGS.targetFolder,
+      sanitizeTargetFolder(this.settings.targetFolder),
       "--json-progress"
     ];
     if (selectedModel) args.push("--llm-model", selectedModel);
@@ -2954,13 +2965,18 @@ ${message}`, 8e3);
       cwd: projectPath,
       env: engineEnv,
       shell: false,
-      windowsHide: true
+      windowsHide: true,
+      // Own a process group on POSIX so cancellation can reach yt-dlp/ffmpeg
+      // grandchildren; Windows uses `taskkill /T` for the same effect.
+      detached: process.platform !== "win32"
     });
     this.activeProcess = child;
     this.openProgressModal();
-    (0, import_node_readline.createInterface)({ input: child.stdout }).on("line", (line) => {
+    const outputLines = (0, import_node_readline.createInterface)({ input: child.stdout });
+    outputLines.on("line", (line) => {
       this.handleOutputLine(line, vaultPath);
     });
+    child.once("close", () => outputLines.close());
     child.stderr.on("data", (chunk) => {
       this.stderrTail = this.redactProviderSecrets(
         (this.stderrTail + chunk.toString("utf8")).slice(-4e3)
@@ -2985,6 +3001,7 @@ ${message}`, 8e3);
     try {
       const event = JSON.parse(line.slice(marker + EVENT_PREFIX.length));
       const state = this.taskState;
+      if (state && state.status !== "running") return;
       if (event.type === "progress" && state) {
         state.progress = Math.max(0, Math.min(1, event.progress ?? 0));
         const message = (event.message ?? "").replace(/\s+$/, "");
@@ -3000,7 +3017,12 @@ ${message}`, 8e3);
         this.progressModal?.refresh();
       } else if (event.type === "artifact" && event.kind === "obsidian_note") {
         if (state && event.path && (0, import_node_path2.isAbsolute)(event.path)) {
-          state.notePath = (0, import_obsidian6.normalizePath)((0, import_node_path2.relative)(vaultPath, event.path));
+          const absoluteNote = (0, import_node_path2.resolve)(event.path);
+          const absoluteVault = (0, import_node_path2.resolve)(vaultPath);
+          const vaultRelative = (0, import_node_path2.relative)(absoluteVault, absoluteNote);
+          if (vaultRelative && vaultRelative !== ".." && !vaultRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !(0, import_node_path2.isAbsolute)(vaultRelative)) {
+            state.notePath = (0, import_obsidian6.normalizePath)(vaultRelative);
+          }
         }
       }
     } catch {
@@ -3044,7 +3066,7 @@ ${errorMessage ?? "\u672A\u77E5\u9519\u8BEF"}`, 1e4);
         await this.app.workspace.getLeaf(false).openFile(note);
         return;
       }
-      await new Promise((resolve2) => window.setTimeout(resolve2, NOTE_OPEN_INTERVAL_MS));
+      await new Promise((resolve3) => window.setTimeout(resolve3, NOTE_OPEN_INTERVAL_MS));
     }
   }
   cancelActiveTask(showNotice = true) {
@@ -3055,6 +3077,12 @@ ${errorMessage ?? "\u672A\u77E5\u9519\u8BEF"}`, 1e4);
       (0, import_node_child_process.spawn)("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
         windowsHide: true
       });
+    } else if (child.pid) {
+      try {
+        process.kill(-child.pid, "SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
     } else {
       child.kill("SIGTERM");
     }

@@ -15,15 +15,21 @@ from typing import Callable
 import httpx
 from openai import APIConnectionError, APIStatusError, OpenAI
 
-from cancellation import CancellationSignal, check_cancelled
-from llm_config import resolve_llm_config
+from cancellation import CancellationRequested, CancellationSignal, check_cancelled
+from llm_config import default_model, resolve_llm_config
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024
 DETAILED_CHUNK_SIZE = 6_500
 MAX_DETAILED_CHUNKS = 12
 MAX_API_ATTEMPTS = 3
 RETRY_DELAYS = (2.0, 5.0)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+DEFAULT_LLM_TIMEOUT = 300.0
+CHAPTER_PHASE_CEILING = 0.80
+TRUNCATION_WARNING = (
+    "\n\n> [!warning] 本节输出达到模型长度上限被截断，内容可能不完整。"
+)
 API_ERROR_MESSAGES = {
     401: "API 认证失败，请检查 API Key 是否与 Base URL 匹配。",
     402: (
@@ -33,6 +39,35 @@ API_ERROR_MESSAGES = {
     429: "API 请求过于频繁或已达到速率限制，请稍后重试。",
 }
 SummaryProgressCb = Callable[[str, float], None]
+
+# Tokens that look like credentials must never reach a log, a note, or an
+# exception message. Gateways frequently echo the Authorization header back in
+# 4xx/5xx bodies, so every server-supplied string is scrubbed before reuse.
+_SECRET_PATTERNS = (
+    re.compile(r"\b(?:sk|xai|pk|rk|ak)-[A-Za-z0-9_\-]{8,}", re.IGNORECASE),
+    re.compile(r"\bBearer\s+[A-Za-z0-9._\-]{8,}", re.IGNORECASE),
+    re.compile(r"\b[A-Za-z0-9_\-]{32,}\b"),
+)
+
+
+def llm_timeout() -> float:
+    """Per-request timeout in seconds; ``LLM_TIMEOUT`` overrides the default."""
+    raw = os.environ.get("LLM_TIMEOUT", "").strip()
+    if not raw:
+        return DEFAULT_LLM_TIMEOUT
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_LLM_TIMEOUT
+    return value if value > 0 else DEFAULT_LLM_TIMEOUT
+
+
+def _redact(text: object, limit: int = 240) -> str:
+    """Strip credential-looking tokens from server-supplied text."""
+    value = str(text or "")
+    for pattern in _SECRET_PATTERNS:
+        value = pattern.sub("<redacted>", value)
+    return value[:limit]
 
 TITLE_TAG_OPEN = "<<<TITLE>>>"
 TITLE_TAG_CLOSE = "<<<END>>>"
@@ -75,7 +110,15 @@ def _client(
     base_url: str | None = None,
 ) -> OpenAI:
     config = resolve_llm_config(model, api_key=api_key, base_url=base_url)
-    return OpenAI(api_key=config.api_key, base_url=config.base_url)
+    # max_retries=0 keeps retry policy (and cancellation) in _chat_completion;
+    # the SDK default of 2 would silently triple every attempt and ignore the
+    # cancel event while sleeping.
+    return OpenAI(
+        api_key=config.api_key,
+        base_url=config.base_url,
+        timeout=llm_timeout(),
+        max_retries=0,
+    )
 
 
 def _b64_image(path: Path) -> str:
@@ -87,8 +130,32 @@ def _b64_image(path: Path) -> str:
     return base64.standard_b64encode(data).decode("ascii")
 
 
+def _select_frames_within_budget(frames: list[Path]) -> tuple[list[Path], int]:
+    """Keep frames in order until the total on-disk size hits the budget.
+
+    Base64 inflates payloads by ~33% and the whole request is held in memory,
+    so an unbounded frame list can blow up RAM well before the API rejects it.
+    A frame whose size cannot be read is kept, not dropped: ``_b64_image`` will
+    raise a precise error for it rather than the note silently losing a frame.
+    """
+    selected: list[Path] = []
+    total = 0
+    for frame in frames:
+        try:
+            size = frame.stat().st_size
+        except OSError:
+            size = 0
+        if selected and total + size > MAX_TOTAL_IMAGE_BYTES:
+            break
+        selected.append(frame)
+        total += size
+    return selected, len(frames) - len(selected)
+
+
 def _split_transcript(text: str, max_chars: int) -> list[str]:
     """Split on transcript lines while keeping every character in order."""
+    if max_chars < 1:
+        raise ValueError("max_chars 必须大于 0")
     chunks: list[str] = []
     current: list[str] = []
     current_size = 0
@@ -117,11 +184,23 @@ def _split_transcript(text: str, max_chars: int) -> list[str]:
 def _response_text(response) -> str:
     if isinstance(response, str):
         text = response
+        truncated = False
     else:
-        text = response.choices[0].message.content or ""
+        choices = getattr(response, "choices", None)
+        if not choices:
+            # Some gateways answer 200 with an empty choices list when a
+            # moderation filter fires; indexing would raise a bare IndexError.
+            raise RuntimeError("AI 服务返回了空内容（没有候选回复）")
+        text = choices[0].message.content or ""
+        truncated = getattr(choices[0], "finish_reason", None) == "length"
     if not isinstance(text, str) or not text.strip():
         raise RuntimeError("AI 服务返回了空内容")
-    return text.strip()
+    text = text.strip()
+    # Never hand back a silently cut note: the marker survives into the report
+    # so the reader can tell the model ran out of output budget.
+    if truncated and TRUNCATION_WARNING.strip() not in text:
+        text += TRUNCATION_WARNING
+    return text
 
 
 def _uses_responses_api() -> bool:
@@ -137,6 +216,8 @@ def _uses_anthropic_messages() -> bool:
 def _anthropic_messages_url(base_url: str) -> str:
     """Append /messages to the API root, matching the plugin's endpoint logic."""
     url = base_url.rstrip("/")
+    if url.endswith("/messages"):
+        return url
     if url.endswith("/v1"):
         return f"{url}/messages"
     if "/v1/" in url:
@@ -221,7 +302,20 @@ def _responses_completion(client: OpenAI, **kwargs) -> str:
     if kwargs.get("max_tokens"):
         request["max_output_tokens"] = kwargs["max_tokens"]
     response = client.responses.create(**request)
-    return getattr(response, "output_text", "") or ""
+    text = getattr(response, "output_text", "") or ""
+    incomplete = getattr(response, "incomplete_details", None)
+    reason = getattr(incomplete, "reason", None)
+    if isinstance(incomplete, dict):
+        reason = incomplete.get("reason")
+    if (
+        text
+        and (
+            getattr(response, "status", None) == "incomplete"
+            or reason in {"max_output_tokens", "length"}
+        )
+    ):
+        text += TRUNCATION_WARNING
+    return text
 
 
 def _wait_before_retry(
@@ -293,20 +387,31 @@ def _anthropic_completion(
             payload = response.json()
             error_obj = payload.get("error") if isinstance(payload, dict) else None
             if isinstance(error_obj, dict):
-                detail = str(error_obj.get("message", ""))[:240]
+                detail = _redact(error_obj.get("message", ""))
             elif isinstance(payload, dict) and payload.get("message"):
-                detail = str(payload["message"])[:240]
+                detail = _redact(payload["message"])
         except Exception:
-            detail = response.text[:240]
+            detail = _redact(response.text)
         raise _AnthropicHttpError(response.status_code, detail)
 
-    payload = response.json()
+    try:
+        payload = response.json()
+    except Exception as error:
+        raise RuntimeError("AI 服务返回了无法解析的响应（非 JSON）") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("AI 服务返回了意外的响应结构")
+    blocks = payload.get("content")
+    if not isinstance(blocks, list):
+        blocks = []
     text_parts = [
         block.get("text", "")
-        for block in payload.get("content", [])
-        if block.get("type") == "text"
+        for block in blocks
+        if isinstance(block, dict) and block.get("type") == "text"
     ]
-    return "\n".join(part for part in text_parts if part)
+    text = "\n".join(part for part in text_parts if part)
+    if payload.get("stop_reason") == "max_tokens" and text:
+        text += TRUNCATION_WARNING
+    return text
 
 
 def _anthropic_chat_completion(
@@ -341,16 +446,16 @@ def _anthropic_chat_completion(
             if not retryable or attempt == MAX_API_ATTEMPTS:
                 message = API_ERROR_MESSAGES.get(error.status_code)
                 if message:
-                    raise RuntimeError(message) from error
+                    raise RuntimeError(message) from None
                 if retryable:
                     raise RuntimeError(
                         f"AI 服务暂时不可用（HTTP {error.status_code}），"
                         f"已自动重试 {MAX_API_ATTEMPTS} 次仍失败，请稍后重试。"
-                    ) from error
-                detail = error.detail or ""
+                    ) from None
+                detail = _redact(error.detail)
                 raise RuntimeError(
                     f"Anthropic 请求失败（HTTP {error.status_code}）{('：' + detail) if detail else ''}"
-                ) from error
+                ) from None
         _wait_before_retry(attempt, cancel_event)
     raise RuntimeError("Anthropic 请求已耗尽重试次数")
 
@@ -388,13 +493,19 @@ def _chat_completion(
             if not retryable or attempt == MAX_API_ATTEMPTS:
                 message = API_ERROR_MESSAGES.get(error.status_code)
                 if message:
-                    raise RuntimeError(message) from error
+                    raise RuntimeError(message) from None
                 if retryable:
                     raise RuntimeError(
                         f"AI 服务暂时不可用（HTTP {error.status_code}），"
                         f"已自动重试 {MAX_API_ATTEMPTS} 次仍失败，请稍后重试。"
-                    ) from error
-                raise
+                    ) from None
+                # Never re-raise the SDK error verbatim: its message embeds the
+                # whole response body, which many gateways fill with the
+                # Authorization header we just sent.
+                raise RuntimeError(
+                    f"AI 请求失败（HTTP {error.status_code}）："
+                    f"{_redact(getattr(error, 'message', '') or error)}"
+                ) from None
         _wait_before_retry(attempt, cancel_event)
 
 
@@ -500,16 +611,46 @@ def _generate_chapter_notes(
             for index, chunk in enumerate(chunks, start=1)
         ]
         completed = 0
+        failures = 0
+        first_error: Exception | None = None
         for future in as_completed(futures):
             check_cancelled(cancel_event)
-            note_index, note = future.result()
+            try:
+                note_index, note = future.result()
+            except CancellationRequested:
+                raise
+            except Exception as error:
+                # One bad chunk must not discard the chapters that did succeed;
+                # the gap is recorded in the note instead of failing the run.
+                failures += 1
+                if first_error is None:
+                    first_error = error
+                completed += 1
+                if on_progress:
+                    on_progress(
+                        f"第 {completed}/{len(chunks)} 段整理失败，将跳过该段",
+                        min(
+                            CHAPTER_PHASE_CEILING,
+                            completed / (len(chunks) + 1),
+                        ),
+                    )
+                continue
             notes[note_index] = note
             completed += 1
             if on_progress:
                 on_progress(
                     f"详细章节已完成 {completed}/{len(chunks)}",
-                    completed / (len(chunks) + 1),
+                    min(CHAPTER_PHASE_CEILING, completed / (len(chunks) + 1)),
                 )
+    if failures and failures == len(chunks):
+        raise RuntimeError(
+            f"全部 {len(chunks)} 个章节均整理失败：{first_error}"
+        ) from first_error
+    if failures and on_progress:
+        on_progress(
+            f"注意：{failures}/{len(chunks)} 段未能整理，报告将缺少这些内容",
+            CHAPTER_PHASE_CEILING,
+        )
     return [note for note in notes if note]
 
 
@@ -521,7 +662,7 @@ def summarize(
     description: str,
     transcript: str,
     frame_paths: list[Path] | None = None,
-    model: str = "grok-4.5",
+    model: str | None = None,
     language: str = "zh",
     api_key: str | None = None,
     base_url: str | None = None,
@@ -531,12 +672,23 @@ def summarize(
     """
     Build scan-first knowledge notes from transcript and optional key frames.
     """
+    model = (model or default_model()).strip()
     config = resolve_llm_config(model, api_key=api_key, base_url=base_url)
     client = _client(model, api_key=api_key, base_url=base_url)
-    http_client = httpx.Client(timeout=httpx.Timeout(300.0)) if _uses_anthropic_messages() else None
+    http_client = (
+        httpx.Client(timeout=httpx.Timeout(llm_timeout()))
+        if _uses_anthropic_messages()
+        else None
+    )
     try:
         check_cancelled(cancel_event)
-        frames = frame_paths or []
+        frames, dropped_frames = _select_frames_within_budget(frame_paths or [])
+        if dropped_frames and on_progress:
+            on_progress(
+                f"关键帧总体积超过上限，已只发送前 {len(frames)} 张"
+                f"（跳过 {dropped_frames} 张）",
+                0.0,
+            )
         chapter_notes = _generate_chapter_notes(
             client,
             http_client=http_client,

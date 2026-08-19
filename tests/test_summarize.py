@@ -15,6 +15,27 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 import summarize  # noqa: E402
+from llm_config import LLMConfig  # noqa: E402
+
+
+def _fake_resolve_llm_config(
+    model: str | None = None,
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    grok_config_path: Path | None = None,
+) -> LLMConfig:
+    """Stand in for the real resolver while honouring explicit arguments.
+
+    ``summarize()`` resolves the LLM config itself, so without this stub every
+    test that calls it would depend on ambient ``LLM_*``/``XAI_*`` environment
+    variables or a local ``~/.grok/config.toml``.
+    """
+    return LLMConfig(
+        api_key=api_key or "test-key",
+        base_url=(base_url or "https://api.test/v1").rstrip("/"),
+        source="test stub",
+    )
 
 
 def _status_error(status_code: int) -> summarize.APIStatusError:
@@ -24,6 +45,14 @@ def _status_error(status_code: int) -> summarize.APIStatusError:
 
 
 class SummarizeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        patcher = patch(
+            "summarize.resolve_llm_config",
+            side_effect=_fake_resolve_llm_config,
+        )
+        self.resolve_config_mock = patcher.start()
+        self.addCleanup(patcher.stop)
+
     @patch("summarize.OpenAI")
     def test_client_uses_custom_openai_compatible_endpoint(self, openai_mock) -> None:
         summarize._client(
@@ -35,6 +64,8 @@ class SummarizeTests(unittest.TestCase):
         openai_mock.assert_called_once_with(
             api_key="custom-key",
             base_url="https://gateway.example.test/v1",
+            timeout=summarize.DEFAULT_LLM_TIMEOUT,
+            max_retries=0,
         )
 
     def test_split_transcript_preserves_content(self) -> None:
@@ -78,6 +109,19 @@ class SummarizeTests(unittest.TestCase):
             [item["type"] for item in content[1:]],
             ["image_url"] * 13,
         )
+
+    def test_response_text_marks_length_truncation(self) -> None:
+        response = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="partial result"),
+                    finish_reason="length",
+                )
+            ]
+        )
+        text = summarize._response_text(response)
+        self.assertIn("partial result", text)
+        self.assertIn("输出达到模型长度上限被截断", text)
 
     def test_timestamp_bounds_supports_short_and_hour_timestamps(self) -> None:
         self.assertEqual(

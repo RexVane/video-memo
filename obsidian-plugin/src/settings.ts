@@ -1,7 +1,6 @@
-import { loadCcSwitchProviders } from "./ccswitch";
+import { loadCcSwitchProviders, normalizeApiFormat } from "./ccswitch";
 import type {
   CcSwitchUiSettings,
-  CustomProviderApiFormat,
   CustomProviderConfig,
   ProviderSource,
 } from "./ccswitch-settings";
@@ -26,18 +25,6 @@ export const DEFAULT_SETTINGS: VideoMemoSettings = {
   cleanupMedia: false,
 };
 
-function normalizeApiFormat(value: unknown): CustomProviderApiFormat {
-  if (typeof value !== "string") return "chat_completions";
-  const normalized = value.trim().toLowerCase().replace("-", "_");
-  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
-    return "anthropic_messages";
-  }
-  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
-    return "responses";
-  }
-  return "chat_completions";
-}
-
 function normalizeCustomProviders(raw: unknown): CustomProviderConfig[] {
   if (!Array.isArray(raw)) return [];
   const seen = new Set<string>();
@@ -56,6 +43,26 @@ function normalizeCustomProviders(raw: unknown): CustomProviderConfig[] {
     result.push({ id, name, baseUrl, apiKey, model, apiFormat });
   }
   return result;
+}
+
+/**
+ * Confine the vault-relative output folder.
+ *
+ * The value is handed to the Python engine, which joins it against the vault
+ * root, so a `..` segment or an absolute path would let notes and frame
+ * attachments escape the vault entirely.
+ */
+export function sanitizeTargetFolder(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_SETTINGS.targetFolder;
+  const cleaned = value
+    .trim()
+    .replace(/[\\]+/g, "/")
+    .split("/")
+    .map((part) => part.trim())
+    .filter((part) => part && part !== "." && part !== "..")
+    .join("/");
+  if (!cleaned || /^[A-Za-z]:/.test(cleaned)) return DEFAULT_SETTINGS.targetFolder;
+  return cleaned;
 }
 
 export function normalizeSettings(
@@ -109,7 +116,7 @@ export function normalizeSettings(
     model: stringValue(stored?.model, DEFAULT_SETTINGS.model),
     customProviders,
     activeCustomProviderId: activeIdIsValid ? activeCustomProviderId : (customProviders[0]?.id ?? ""),
-    targetFolder: stringValue(stored?.targetFolder, DEFAULT_SETTINGS.targetFolder),
+    targetFolder: sanitizeTargetFolder(stored?.targetFolder),
     cleanupMedia:
       typeof stored?.cleanupMedia === "boolean"
         ? stored.cleanupMedia

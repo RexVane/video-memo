@@ -86,14 +86,20 @@ def _is_cuda_runtime_error(error: Exception) -> bool:
         messages.append(str(current).lower())
         current = current.__cause__ or current.__context__
     combined = "\n".join(messages)
+    # Avoid bare "cuda"/"out of memory" markers: a legitimate GPU OOM is a
+    # model-capacity problem, not a missing runtime, and blindly retrying a
+    # large model on CPU produces a slower, less useful second failure.
     return any(
         marker in combined
         for marker in (
-            "cuda",
             "cublas",
             "cudnn",
             "nvcuda",
-            "out of memory",
+            "cuda runtime",
+            "cuda driver",
+            "failed to load cuda",
+            "library cuda",
+            "libcuda",
         )
     )
 
@@ -171,6 +177,8 @@ def transcribe(
         raise FileNotFoundError(f"音频文件不存在: {audio_path}")
     if device not in {"auto", "cpu", "cuda"}:
         raise ValueError("device 必须是 auto、cpu 或 cuda")
+    if model_size not in {"tiny", "base", "small", "medium", "large-v3"}:
+        raise ValueError("model_size 必须是 tiny、base、small、medium 或 large-v3")
 
     model_dir = get_whisper_model_dir()
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -205,8 +213,7 @@ def transcribe(
         device = "cpu"
 
     compute_type = "float16" if device == "cuda" else "int8"
-    if device != "cpu":
-        status(f"使用 {device.upper()} {compute_type}")
+    status(f"使用 {device.upper()} {compute_type}")
     return _transcribe_once(
         WhisperModel,
         audio_path,
@@ -221,4 +228,7 @@ def transcribe(
 
 
 def save_transcript(transcript: Transcript, path: Path) -> None:
-    path.write_text(transcript.text, encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(transcript.text, encoding="utf-8")
+    temporary.replace(path)

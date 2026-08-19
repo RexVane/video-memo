@@ -5,6 +5,7 @@ import {
   fetchCcSwitchProviderModels,
   fetchOpenAiCompatibleModels,
   loadCcSwitchProviders,
+  normalizeApiFormat,
   normalizeOpenAiBaseUrl,
   probeOpenAiCompatibleModel,
   type CcSwitchProvider,
@@ -532,7 +533,7 @@ export class CcSwitchProviderSettingsView {
     formatSelect.createEl("option", { value: "responses", text: "Responses API" });
     formatSelect.value = draft.apiFormat;
     formatSelect.addEventListener("change", () => {
-      draft.apiFormat = formatSelect.value === "responses" ? "responses" : "chat_completions";
+      draft.apiFormat = normalizeApiFormat(formatSelect.value);
       invalidateTest();
     });
 
@@ -1107,7 +1108,10 @@ export class CcSwitchProviderSettingsView {
     });
     setIcon(copyButton, "copy");
     copyButton.addEventListener("click", () => {
-      void navigator.clipboard.writeText(content).then(() => new Notice("配置已复制"));
+      void navigator.clipboard
+        .writeText(content)
+        .then(() => new Notice("配置已复制"))
+        .catch(() => new Notice("复制失败，请手动选择配置"));
     });
     configSection.createEl("pre", { cls: "ccswitch-code-block", text: content });
   }

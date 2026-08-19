@@ -13,8 +13,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
-
-from project_paths import project_root
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
@@ -23,18 +21,19 @@ from download import (
     BrowserCookieError,
     DownloadResult,
     VideoMetadata,
+    _yt_dlp_command,
     cleanup_media_files,
     download,
     import_local_media,
     load_download_result,
     probe,
-    _yt_dlp_command,
 )
 from frames import extract_frames
 from llm_config import LLMConfig, default_model, resolve_llm_config
 from obsidian_export import export_to_vault
-from summarize import summarize
+from project_paths import project_root
 from subtitles import transcript_from_vtt
+from summarize import summarize
 from transcribe import Transcript, save_transcript, transcribe
 from version import VERSION
 

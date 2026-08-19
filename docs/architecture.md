@@ -30,7 +30,7 @@ selected media
   ├─ ffmpeg → mono 16 kHz audio.wav
   ├─ platform VTT → transcript.txt
   ├─ otherwise faster-whisper → transcript.txt
-  ├─ video + ffmpeg → frames/frame_*.jpg (unless --no-vision)
+  ├─ video + ffmpeg → evenly sampled frames/frame_*.jpg (unless --no-vision)
   └─ OpenAI-compatible API → summary.md → optional Obsidian note
 ```
 

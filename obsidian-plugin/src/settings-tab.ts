@@ -1,7 +1,7 @@
-import { PluginSettingTab, Setting, setIcon, type App } from "obsidian";
+import { Notice, PluginSettingTab, Setting, setIcon, type App } from "obsidian";
 
 import { CcSwitchProviderSettingsView } from "./ccswitch-settings";
-import { describeProviderSelection } from "./settings";
+import { describeProviderSelection, sanitizeTargetFolder } from "./settings";
 import type VideoMemoPlugin from "./main";
 
 export class VideoMemoSettingTab extends PluginSettingTab {
@@ -15,9 +15,12 @@ export class VideoMemoSettingTab extends PluginSettingTab {
     this.providerView = new CcSwitchProviderSettingsView({
       app,
       getSettings: () => this.plugin.settings,
+      // Never reject: dozens of call sites chain .then() without .catch(), so a
+      // failed write must surface as a Notice here instead of becoming an
+      // unhandled rejection that also skips the caller's re-render.
       updateSettings: async (patch) => {
         Object.assign(this.plugin.settings, patch);
-        await this.plugin.saveData(this.plugin.settings);
+        await this.persist();
       },
       rerender: () => this.display(),
       onBack: () => {
@@ -25,6 +28,15 @@ export class VideoMemoSettingTab extends PluginSettingTab {
         this.display();
       },
     });
+  }
+
+  private async persist(): Promise<void> {
+    try {
+      await this.plugin.saveData(this.plugin.settings);
+    } catch (error) {
+      console.error("VideoMemo: failed to save settings", error);
+      new Notice("VideoMemo 设置保存失败，请检查 Vault 是否可写");
+    }
   }
 
   display(): void {
@@ -78,7 +90,7 @@ export class VideoMemoSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.projectPath)
           .onChange(async (value) => {
             this.plugin.settings.projectPath = value.trim();
-            await this.plugin.saveData(this.plugin.settings);
+            await this.persist();
             this.display();
           }),
       );
@@ -99,10 +111,11 @@ export class VideoMemoSettingTab extends PluginSettingTab {
     });
     new Setting(containerEl)
       .setName("Vault 目标文件夹")
+      .setDesc("Vault 内的相对路径；不允许绝对路径或 .. 片段")
       .addText((text) =>
         text.setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
-          this.plugin.settings.targetFolder = value.trim();
-          await this.plugin.saveData(this.plugin.settings);
+          this.plugin.settings.targetFolder = sanitizeTargetFolder(value);
+          await this.persist();
         }),
       );
     new Setting(containerEl)
@@ -111,7 +124,7 @@ export class VideoMemoSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.cleanupMedia).onChange(async (value) => {
           this.plugin.settings.cleanupMedia = value;
-          await this.plugin.saveData(this.plugin.settings);
+          await this.persist();
         }),
       );
   }
