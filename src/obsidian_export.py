@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
+import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Iterator
 from urllib.parse import unquote, urlparse
 
 from download import AUDIO_EXTS, VIDEO_EXTS, DownloadResult
@@ -16,6 +21,8 @@ _GENERATED_START = "<!-- videomemo:generated:start -->"
 _GENERATED_END = "<!-- videomemo:generated:end -->"
 _SOURCE_MARKER = "<!-- videomemo:source:{source_id} -->"
 _HEAD_SCAN_BYTES = 8 * 1024
+_ASSET_GENERATION_NAME = re.compile(r"v-[0-9a-f]{32}\Z")
+_ASSET_STAGING_NAME = re.compile(r"\.v-[0-9a-f]{32}\.[0-9a-f]{32}\.tmp\Z")
 
 
 def _safe_name(value: str, limit: int = 80) -> str:
@@ -119,6 +126,138 @@ def _media_type(metadata: DownloadResult, has_frames: bool) -> str:
     return "video" if is_remote else "audio"
 
 
+def _remove_tree(path: Path) -> None:
+    """Remove a staged/backup path whether it is a directory or a file."""
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _stage_frames(source_frames: list[Path], generation_dir: Path) -> Path:
+    """Build one immutable attachment generation beside its final path."""
+    parent = generation_dir.parent
+    parent.mkdir(parents=True, exist_ok=True)
+    staged = parent / f".{generation_dir.name}.{uuid.uuid4().hex}.tmp"
+    staged.mkdir()
+    try:
+        for frame in source_frames:
+            shutil.copy2(frame, staged / frame.name)
+        return staged
+    except BaseException:
+        try:
+            _remove_tree(staged)
+        except OSError:
+            pass
+        raise
+
+
+def _publish_frames(staged: Path, generation_dir: Path) -> None:
+    """Publish a complete, uniquely named generation without touching the old one."""
+    os.replace(staged, generation_dir)
+
+
+def _note_matches(path: Path, expected: str) -> bool | None:
+    """Return whether the note is committed, or None when it cannot be inspected."""
+    try:
+        return path.read_text(encoding="utf-8") == expected
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # An uncertain result must retain the new generation.  An orphan is
+        # harmless, while deleting a generation referenced by a committed note
+        # would corrupt the export.
+        return None
+
+
+def _cleanup_obsolete_frames(
+    asset_root: Path,
+    keep_entries: set[str] | None,
+) -> None:
+    """Best-effort cleanup after the note has atomically selected a generation."""
+    if keep_entries is None:
+        # A report without frames does not establish a new attachment state.
+        # Keep existing/legacy files because user annotations or older notes
+        # may still reference them.
+        return
+    try:
+        entries = list(asset_root.iterdir())
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name in keep_entries:
+            continue
+        is_generation = _ASSET_GENERATION_NAME.fullmatch(entry.name) is not None
+        is_staging = _ASSET_STAGING_NAME.fullmatch(entry.name) is not None
+        is_legacy_frame = entry.match("frame_*.jpg")
+        if not (is_generation or is_staging or is_legacy_frame):
+            continue
+        try:
+            _remove_tree(entry)
+        except OSError:
+            # Cleanup is deliberately post-commit.  Leaving an obsolete or
+            # crash-orphaned generation must not turn a valid export into a
+            # reported failure.
+            pass
+
+
+def _referenced_asset_entries(
+    note_text: str,
+    asset_root: Path,
+    vault: Path,
+) -> set[str]:
+    relative_root = asset_root.relative_to(vault).as_posix() + "/"
+    referenced: set[str] = set()
+    for target in re.findall(r"!\[\[([^\]|#]+)", note_text):
+        if not target.startswith(relative_root):
+            continue
+        first_part = target.removeprefix(relative_root).split("/", 1)[0]
+        is_generation = _ASSET_GENERATION_NAME.fullmatch(first_part) is not None
+        is_legacy_frame = Path(first_part).match("frame_*.jpg")
+        if is_generation or is_legacy_frame:
+            referenced.add(first_part)
+    return referenced
+
+
+@contextmanager
+def _source_export_lock(destination: Path, source_id: str) -> Iterator[None]:
+    """Serialize one source's note and attachment transaction across processes."""
+    lock_path = destination / f".videomemo-{source_id}.export.lock"
+    lock_handle = lock_path.open("a+b")
+    try:
+        lock_handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            # Export callers should wait rather than fail when two completed
+            # tasks target the same source at nearly the same time.  LK_LOCK
+            # itself gives up after a small fixed retry count, so poll the
+            # non-blocking form until the owning process closes its handle.
+            while True:
+                lock_handle.seek(0)
+                try:
+                    msvcrt.locking(lock_handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            import fcntl
+
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        lock_handle.seek(0)
+        lock_handle.truncate()
+        lock_handle.write(f"{os.getpid()}\n".encode("ascii"))
+        lock_handle.flush()
+        yield
+    finally:
+        lock_handle.close()
+
+
 def export_to_vault(
     summary_path: Path,
     metadata: DownloadResult,
@@ -137,6 +276,26 @@ def export_to_vault(
     destination = _resolve_destination(vault, folder, topic)
     destination.mkdir(parents=True, exist_ok=True)
     source_id = hashlib.sha256(metadata.webpage_url.encode("utf-8")).hexdigest()[:8]
+    with _source_export_lock(destination, source_id):
+        return _export_to_vault_locked(
+            summary_path,
+            metadata,
+            vault,
+            destination,
+            source_id,
+            note_title=note_title,
+        )
+
+
+def _export_to_vault_locked(
+    summary_path: Path,
+    metadata: DownloadResult,
+    vault: Path,
+    destination: Path,
+    source_id: str,
+    *,
+    note_title: str | None,
+) -> Path:
     name_source = note_title.strip() if note_title and note_title.strip() else metadata.title
     note_stem = _safe_name(name_source)
     preferred_note_path = destination / f"{note_stem}.md"
@@ -144,17 +303,16 @@ def export_to_vault(
 
     frame_links: list[str] = []
     source_frames = sorted(summary_path.parent.glob("frames/frame_*.jpg"))
+    asset_root = destination / "assets" / source_id
+    generation_dir: Path | None = None
+    staged_frames: Path | None = None
     if source_frames:
-        # Use the fixed-length source id rather than the human title. Apart from
-        # avoiding Windows MAX_PATH failures in deep vaults, attachments keep a
-        # stable location when the AI-generated note title changes.
-        asset_dir = destination / "assets" / source_id
-        asset_dir.mkdir(parents=True, exist_ok=True)
-        for stale in asset_dir.glob("frame_*.jpg"):
-            stale.unlink()
+        # The source id keeps the root stable across title changes.  Each export
+        # writes a new immutable child directory so the old note can continue
+        # to reference the old frames until its atomic replace commits.
+        generation_dir = asset_root / f"v-{uuid.uuid4().hex}"
         for frame in source_frames:
-            copied = asset_dir / frame.name
-            shutil.copy2(frame, copied)
+            copied = generation_dir / frame.name
             vault_relative = copied.relative_to(vault).as_posix()
             frame_links.append(f"![[{vault_relative}]]")
 
@@ -190,6 +348,8 @@ def export_to_vault(
     source_marker = _SOURCE_MARKER.format(source_id=source_id)
     wrapped = f"{_GENERATED_START}\n{source_marker}\n{generated}{_GENERATED_END}\n"
     final_text = frontmatter + wrapped
+    legacy_backup_path: Path | None = None
+    needs_legacy_backup = False
     if note_path.is_file():
         previous = note_path.read_text(encoding="utf-8")
         start = previous.find(_GENERATED_START)
@@ -201,10 +361,56 @@ def export_to_vault(
             # A legacy VideoMemo note may contain user annotations with no
             # generated-region markers. Preserve it as a timestamped backup
             # before the one-time migration instead of silently clobbering it.
+            needs_legacy_backup = True
+    temporary = note_path.with_name(f".{note_path.name}.{uuid.uuid4().hex}.tmp")
+    generation_published = False
+    try:
+        temporary.write_text(final_text, encoding="utf-8")
+        if source_frames and generation_dir is not None:
+            staged_frames = _stage_frames(source_frames, generation_dir)
+            _publish_frames(staged_frames, generation_dir)
+            staged_frames = None
+            generation_published = True
+        if needs_legacy_backup:
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            backup = note_path.with_name(f"{note_path.stem}.backup-{stamp}.md")
-            shutil.copy2(note_path, backup)
-    temporary = note_path.with_suffix(".md.tmp")
-    temporary.write_text(final_text, encoding="utf-8")
-    temporary.replace(note_path)
+            legacy_backup_path = note_path.with_name(
+                f"{note_path.stem}.backup-{stamp}.md"
+            )
+            shutil.copy2(note_path, legacy_backup_path)
+        temporary.replace(note_path)
+    except BaseException:
+        commit_state = _note_matches(note_path, final_text)
+        if generation_published and generation_dir is not None:
+            # Delete only when the old note can be positively identified.  If
+            # inspection fails, retaining an unreferenced generation is safer
+            # than deleting one that an already-committed note may reference.
+            if commit_state is False:
+                try:
+                    _remove_tree(generation_dir)
+                except OSError:
+                    pass
+        if legacy_backup_path is not None and commit_state is False:
+            try:
+                legacy_backup_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if staged_frames is not None:
+            try:
+                _remove_tree(staged_frames)
+            except OSError:
+                pass
+    # The note is the sole commit point.  Cleanup happens only after its atomic
+    # replacement, so a crash before this line can leave at worst an orphaned
+    # generation while the old note and old frames remain a coherent pair.
+    keep_entries: set[str] | None = None
+    if generation_dir is not None:
+        keep_entries = _referenced_asset_entries(final_text, asset_root, vault)
+        keep_entries.add(generation_dir.name)
+    _cleanup_obsolete_frames(asset_root, keep_entries)
     return note_path

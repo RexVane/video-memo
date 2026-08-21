@@ -4,7 +4,19 @@
 
 ## [Unreleased]
 
-- 持续完善 Python 引擎、Obsidian 插件和开源发布流程。
+- 后续修复和发布准备工作将在此记录。
+
+## [0.2.0] - 2026-08-21
+
+- `74f12ab`：支持多个可增删改选的自定义供应商；Python 引擎与插件同时加入 Anthropic Messages 协议、真实最小模型请求连接测试、模型发现/手动输入切换，并重整设置界面和相关文档。
+- `5a0a1b8`：加固 Python 流水线、下载器和插件，包括下载完整性与 Range 响应校验、私网地址防护、外部进程树取消、API 密钥脱敏、模型超时/重试，以及 Cookie、字幕、路径和异常输入处理。
+- `a704881`：由模型输出主题和 AI 标题，将 Obsidian 笔记自动归档到主题目录；通过稳定来源标记跨改名更新同一笔记，并在标题冲突时避免覆盖外部笔记。
+- `bc6cff2`：新增旧版 `Video Memos/<title>_<id>.md` 一次性迁移工具，默认预演，可搬迁附件、改写嵌入链接、恢复标题、补来源标记，并对冲突和无法识别的笔记安全跳过。
+- 修复失败、取消和强制终止后的 `run_status`；普通复用与重新生成共享跨进程锁，复用前快照报告、转写、帧和元数据，失败时恢复同一代缓存。
+- 章节请求部分或全部失败时，在最终报告原位置写入时间范围、段号、重试提示和未整理原文，不再静默跳过缺失章节。
+- 改进 HTTP 与 LLM 请求取消：延迟响应头和正文读取可及时中断且不残留请求线程，客户端 `close()` 阻塞也不延迟取消返回。
+- 将 Obsidian 附件改为不可变版本目录，以笔记原子替换作为唯一提交点；复制失败、提交失败、并发导出或提交前强杀均保持笔记与附件同代。
+- 修复桌面 GUI 在新任务失败后仍引用、打开或复制上一次结果的问题，并增加无显示环境回归测试。
 
 ## [0.1.0] - 2026-08-17
 
@@ -15,5 +27,6 @@
 - 增加普通 HTTP 直链的校验型 Range 多连接下载，并在不适用时回退到 yt-dlp。
 - 统一项目品牌为 VideoMemo / video-memo。
 
-[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/RexVane/video-memo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/RexVane/video-memo/releases/tag/v0.1.0

@@ -4,6 +4,8 @@ import json
 import os
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -144,6 +146,155 @@ class SummarizeTests(unittest.TestCase):
         self.assertIn("> #### 关键结论", callout)
         self.assertIn("> - 工作区的改动需要先暂存。", callout)
         self.assertIn("\n>\n", callout)
+
+    def test_missing_chapter_note_identifies_time_range_and_retry(self) -> None:
+        note = summarize._missing_chapter_note(
+            2,
+            4,
+            "[00:10] middle\n[00:20] end",
+        )
+        self.assertIn("00:10-00:20", note)
+        self.assertIn("第 2/4 段未能整理", note)
+        self.assertIn("重新生成报告", note)
+
+    def test_partial_chapter_failure_is_preserved_in_order(self) -> None:
+        client = MagicMock()
+
+        def create(**kwargs):
+            prompt = kwargs["messages"][1]["content"]
+            if "第 2/3 段" in prompt:
+                raise RuntimeError("temporary chapter failure")
+            return SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        message=SimpleNamespace(content="### generated chapter")
+                    )
+                ]
+            )
+
+        client.chat.completions.create.side_effect = create
+        with patch.object(summarize, "DETAILED_CHUNK_SIZE", 20):
+            notes = summarize._generate_chapter_notes(
+                client,
+                title="Course",
+                transcript="[00:00] " + "a" * 45,
+                model="test-model",
+            )
+
+        self.assertEqual(len(notes), 3)
+        self.assertIn("章节整理失败", notes[1])
+        self.assertIn("重新生成报告", notes[1])
+        self.assertTrue(notes[0].startswith("### generated chapter"))
+        self.assertTrue(notes[2].startswith("### generated chapter"))
+
+    def test_blocking_chat_call_is_interruptible(self) -> None:
+        started = threading.Event()
+        closed = threading.Event()
+        cancel = threading.Event()
+
+        class BlockingClient:
+            def close(self) -> None:
+                closed.set()
+
+            class Chat:
+                class Completions:
+                    def create(inner_self, **kwargs):
+                        started.set()
+                        while not closed.wait(0.01):
+                            pass
+                        raise RuntimeError("closed")
+
+                completions = Completions()
+
+            chat = Chat()
+
+        client = BlockingClient()
+
+        def request() -> None:
+            summarize._chat_completion(
+                client,
+                cancel_event=cancel,
+                model="test-model",
+                messages=[],
+            )
+
+        started_result: dict[str, BaseException] = {}
+
+        def invoke() -> None:
+            try:
+                request()
+            except BaseException as error:
+                started_result["error"] = error
+
+        caller = threading.Thread(target=invoke)
+        caller.start()
+        self.assertTrue(started.wait(1.0))
+        start = time.monotonic()
+        cancel.set()
+        caller.join(1.0)
+        elapsed = time.monotonic() - start
+
+        self.assertFalse(caller.is_alive())
+        self.assertIsInstance(started_result.get("error"), summarize.CancellationRequested)
+        self.assertTrue(closed.is_set())
+        self.assertLess(elapsed, 1.0)
+
+    def test_blocking_client_close_does_not_delay_cancellation(self) -> None:
+        started = threading.Event()
+        close_started = threading.Event()
+        release = threading.Event()
+        cancel = threading.Event()
+
+        class BlockingCloseClient:
+            def close(self) -> None:
+                close_started.set()
+                release.wait()
+
+        result: dict[str, BaseException] = {}
+
+        def invoke() -> None:
+            try:
+                summarize._call_with_cancellation(
+                    lambda: (started.set(), release.wait())[1],
+                    cancel_event=cancel,
+                    clients=(BlockingCloseClient(),),
+                )
+            except BaseException as error:
+                result["error"] = error
+
+        caller = threading.Thread(target=invoke)
+        caller.start()
+        self.assertTrue(started.wait(1.0))
+        start = time.monotonic()
+        cancel.set()
+        caller.join(1.0)
+        elapsed = time.monotonic() - start
+        try:
+            self.assertFalse(caller.is_alive())
+            self.assertIsInstance(result.get("error"), summarize.CancellationRequested)
+            self.assertTrue(close_started.wait(1.0))
+            self.assertLess(elapsed, 1.0)
+        finally:
+            release.set()
+
+    def test_all_chapter_failures_are_returned_as_missing_markers(self) -> None:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = RuntimeError("notes unavailable")
+        progress: list[str] = []
+
+        with patch.object(summarize, "DETAILED_CHUNK_SIZE", 20):
+            notes = summarize._generate_chapter_notes(
+                client,
+                title="Course",
+                transcript="[00:00] " + "a" * 45,
+                model="test-model",
+                on_progress=lambda message, _fraction: progress.append(message),
+            )
+
+        self.assertEqual(len(notes), 3)
+        self.assertTrue(all("章节整理失败" in note for note in notes))
+        self.assertTrue(all("未整理的原始转写片段" in note for note in notes))
+        self.assertTrue(any("全部 3 段" in message for message in progress))
 
     def test_responses_api_converts_multimodal_messages(self) -> None:
         client = MagicMock()
@@ -308,6 +459,41 @@ class SummarizeTests(unittest.TestCase):
         self.assertNotIn("## 复习清单", prompt)
         self.assertIn("## 逐章参考笔记", result.body)
         self.assertIn("> [!note]- 00:00–01:00｜基础概念", result.body)
+
+    @patch("summarize._generate_chapter_notes")
+    @patch("summarize._client")
+    def test_final_report_preserves_missing_chapter_marker(
+        self,
+        client_factory,
+        generate_chapters,
+    ) -> None:
+        client = MagicMock()
+        client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="## 一眼看懂\n精华"))]
+        )
+        client_factory.return_value = client
+        generate_chapters.return_value = [
+            summarize._missing_chapter_note(
+                2,
+                4,
+                "[00:10] missing details\n[00:20] still missing",
+            )
+        ]
+
+        with patch.dict(os.environ, {"LLM_API_FORMAT": ""}):
+            result = summarize.summarize(
+                title="Course",
+                url="https://example.test/course",
+                uploader="Teacher",
+                description="Description",
+                transcript="[00:00] transcript",
+                model="test-model",
+            )
+
+        self.assertIn("章节整理失败", result.body)
+        self.assertIn("第 2/4 段未能整理", result.body)
+        self.assertIn("00:10-00:20", result.body)
+        self.assertIn("未整理的原始转写片段", result.body)
 
     @patch("summarize._generate_chapter_notes")
     @patch("summarize._client")

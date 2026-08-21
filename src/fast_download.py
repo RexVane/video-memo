@@ -7,6 +7,7 @@ import datetime as _datetime
 import email.utils
 import hashlib
 import http.client
+import io
 import ipaddress
 import os
 import re
@@ -96,6 +97,10 @@ class _RetryableTransferError(FastDownloadError):
 
 
 class _WorkerStopped(FastDownloadError):
+    pass
+
+
+class _SocketReadInterrupted(OSError):
     pass
 
 
@@ -263,17 +268,382 @@ def _make_request(
     return urllib.request.Request(url, headers=request_headers, method=method)
 
 
-def _open(request: urllib.request.Request):  # noqa: ANN202
-    opener = urllib.request.build_opener(
+def _close_quietly(value: object) -> None:
+    close = getattr(value, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except Exception:
+        pass
+
+
+def _interrupt_response(response) -> None:  # noqa: ANN001
+    """Wake blocking socket I/O without contending on buffered-reader locks."""
+    fp = getattr(response, "fp", None)
+    raw = getattr(fp, "raw", None)
+    interruptor = getattr(response, "_videomemo_interruptor", None) or getattr(
+        raw,
+        "_interruptor",
+        None,
+    )
+    if interruptor is not None:
+        interruptor.interrupt()
+    sock = getattr(response, "sock", None) or getattr(raw, "_sock", None)
+    if sock is None:
+        # Test doubles and unusual response wrappers may not expose their
+        # socket. Their close implementation is the only available wake-up.
+        _close_quietly(response)
+        return
+    try:
+        sock.shutdown(socket.SHUT_RDWR)
+    except (OSError, ValueError):
+        pass
+
+
+class _ConnectionInterruptor:
+    """Track the connection currently blocked inside ``urllib.open``."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._connection: object | None = None
+        self._stopped = threading.Event()
+
+    def attach(self, connection: object) -> None:
+        with self._lock:
+            self._connection = connection
+            stopped = self._stopped.is_set()
+        if stopped:
+            _interrupt_response(connection)
+
+    def clear(self, connection: object) -> None:
+        with self._lock:
+            if self._connection is connection:
+                self._connection = None
+
+    def interrupt(self) -> None:
+        self._stopped.set()
+        with self._lock:
+            connection = self._connection
+        if connection is not None:
+            _interrupt_response(connection)
+
+    def interrupt_if_stopped(self, connection: object) -> None:
+        if self._stopped.is_set():
+            _interrupt_response(connection)
+
+    def is_stopped(self) -> bool:
+        return self._stopped.is_set()
+
+
+class _InterruptibleSocketIO(socket.SocketIO):
+    """Socket reader that polls cancellation without poisoning timed-out I/O."""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        interruptor: _ConnectionInterruptor,
+    ) -> None:
+        super().__init__(sock, "r")
+        self._interruptor = interruptor
+
+    def readinto(self, buffer) -> int | None:  # noqa: ANN001
+        self._checkClosed()
+        self._checkReadable()
+        sock = self._sock
+        original_timeout = sock.gettimeout()
+        if original_timeout == 0:
+            try:
+                return sock.recv_into(buffer)
+            except BlockingIOError:
+                return None
+
+        deadline = (
+            None
+            if original_timeout is None
+            else time.monotonic() + original_timeout
+        )
+        while True:
+            if self._interruptor.is_stopped():
+                raise _SocketReadInterrupted("HTTP response read interrupted")
+
+            poll_timeout = WAIT_INTERVAL
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout("timed out")
+                poll_timeout = min(poll_timeout, remaining)
+            try:
+                # Closing or shutting down a socket from another thread does
+                # not reliably wake socket.makefile() reads on Windows. A
+                # bounded recv timeout lets this reader observe cancellation
+                # directly without leaving a background request worker alive.
+                sock.settimeout(poll_timeout)
+                try:
+                    return sock.recv_into(buffer)
+                except socket.timeout:
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise
+                    continue
+                except BlockingIOError:
+                    continue
+                except OSError as exc:
+                    if self._interruptor.is_stopped():
+                        raise _SocketReadInterrupted(
+                            "HTTP response read interrupted"
+                        ) from exc
+                    raise
+            finally:
+                try:
+                    sock.settimeout(original_timeout)
+                except (OSError, ValueError):
+                    pass
+
+
+class _InterruptibleResponseSocket:
+    """Provide HTTPResponse with an interruptible equivalent of makefile()."""
+
+    def __init__(
+        self,
+        sock: socket.socket,
+        interruptor: _ConnectionInterruptor,
+    ) -> None:
+        self._sock = sock
+        self._interruptor = interruptor
+
+    def makefile(self, mode: str):  # noqa: ANN201
+        if mode != "rb":
+            raise ValueError(f"unsupported HTTP response socket mode: {mode!r}")
+        raw = _InterruptibleSocketIO(self._sock, self._interruptor)
+        self._sock._io_refs += 1  # noqa: SLF001
+        try:
+            return io.BufferedReader(raw)
+        except BaseException:
+            raw.close()
+            raise
+
+
+class _InterruptibleHTTPResponse(http.client.HTTPResponse):
+    def __init__(
+        self,
+        sock: socket.socket,
+        interruptor: _ConnectionInterruptor,
+        debuglevel: int = 0,
+        method: str | None = None,
+        url: str | None = None,
+    ) -> None:
+        self._videomemo_interruptor = interruptor
+        super().__init__(
+            _InterruptibleResponseSocket(sock, interruptor),
+            debuglevel=debuglevel,
+            method=method,
+            url=url,
+        )
+
+
+class _TrackedHTTPConnection(http.client.HTTPConnection):
+    def __init__(
+        self,
+        host: str,
+        interruptor: _ConnectionInterruptor,
+        **kwargs,
+    ) -> None:  # noqa: ANN003
+        self._interruptor = interruptor
+        super().__init__(host, **kwargs)
+        self.response_class = (
+            lambda sock, *args, **response_kwargs: _InterruptibleHTTPResponse(
+                sock,
+                interruptor,
+                *args,
+                **response_kwargs,
+            )
+        )
+        interruptor.attach(self)
+
+    def connect(self) -> None:
+        super().connect()
+        # Cancellation may arrive while DNS resolution or connect is inside the
+        # platform socket layer, before ``self.sock`` can be interrupted.
+        self._interruptor.interrupt_if_stopped(self)
+
+
+class _TrackedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(
+        self,
+        host: str,
+        interruptor: _ConnectionInterruptor,
+        **kwargs,
+    ) -> None:  # noqa: ANN003
+        self._interruptor = interruptor
+        super().__init__(host, **kwargs)
+        self.response_class = (
+            lambda sock, *args, **response_kwargs: _InterruptibleHTTPResponse(
+                sock,
+                interruptor,
+                *args,
+                **response_kwargs,
+            )
+        )
+        interruptor.attach(self)
+
+    def connect(self) -> None:
+        super().connect()
+        self._interruptor.interrupt_if_stopped(self)
+
+
+class _InterruptibleHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, interruptor: _ConnectionInterruptor) -> None:
+        super().__init__()
+        self._interruptor = interruptor
+
+    def http_open(self, request):  # noqa: ANN001, ANN201
+        connection: http.client.HTTPConnection | None = None
+
+        def create(host: str, **kwargs) -> http.client.HTTPConnection:
+            nonlocal connection
+            connection = _TrackedHTTPConnection(
+                host,
+                self._interruptor,
+                **kwargs,
+            )
+            return connection
+
+        try:
+            return self.do_open(create, request)
+        finally:
+            if connection is not None:
+                self._interruptor.clear(connection)
+
+
+class _InterruptibleHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, interruptor: _ConnectionInterruptor) -> None:
+        super().__init__()
+        self._interruptor = interruptor
+
+    def https_open(self, request):  # noqa: ANN001, ANN201
+        connection: http.client.HTTPSConnection | None = None
+
+        def create(host: str, **kwargs) -> http.client.HTTPSConnection:
+            nonlocal connection
+            connection = _TrackedHTTPSConnection(
+                host,
+                self._interruptor,
+                **kwargs,
+            )
+            return connection
+
+        try:
+            return self.do_open(
+                create,
+                request,
+                context=self._context,
+                check_hostname=self._check_hostname,
+            )
+        finally:
+            if connection is not None:
+                self._interruptor.clear(connection)
+
+
+def _interruptible_opener(interruptor: _ConnectionInterruptor):  # noqa: ANN202
+    return urllib.request.build_opener(
         urllib.request.ProxyHandler({}),
         _SafeRedirectHandler(),
+        _InterruptibleHTTPHandler(interruptor),
+        _InterruptibleHTTPSHandler(interruptor),
     )
-    try:
-        return opener.open(request, timeout=REQUEST_TIMEOUT)
-    except urllib.error.HTTPError:
-        raise
-    except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
-        raise _RetryableNetworkError(f"HTTP request failed: {exc}") from exc
+
+
+def _raise_open_error(error: BaseException) -> None:
+    if isinstance(error, urllib.error.HTTPError):
+        raise error
+    if isinstance(error, (urllib.error.URLError, http.client.HTTPException, OSError)):
+        raise _RetryableNetworkError(f"HTTP request failed: {error}") from error
+    raise error
+
+
+class _InterruptMonitor:
+    """Interrupt one blocking I/O call and always reclaim its supervisor."""
+
+    def __init__(
+        self,
+        interrupt: Callable[[], None],
+        cancel_event: CancellationSignal | None,
+        stop_event: threading.Event | None,
+    ) -> None:
+        self._interrupt = interrupt
+        self._cancel_event = cancel_event
+        self._stop_event = stop_event
+        self._done = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> _InterruptMonitor:
+        if self._cancel_event is not None or self._stop_event is not None:
+            self._thread = threading.Thread(
+                target=self._run,
+                name="http-cancel",
+                daemon=True,
+            )
+            self._thread.start()
+        return self
+
+    def _run(self) -> None:
+        while not self._done.wait(WAIT_INTERVAL):
+            cancelled = (
+                self._cancel_event is not None and self._cancel_event.is_set()
+            )
+            stopped = self._stop_event is not None and self._stop_event.is_set()
+            if cancelled or stopped:
+                self._interrupt()
+                return
+
+    def __exit__(self, exc_type, exc, traceback) -> None:  # noqa: ANN001
+        self._done.set()
+        if self._thread is not None:
+            # The worker only waits on ``_done`` or performs socket.shutdown(),
+            # both bounded operations. Joining prevents cancelled calls from
+            # accumulating dormant request/read workers.
+            self._thread.join()
+
+
+def _open(
+    request: urllib.request.Request,
+    *,
+    cancel_event: CancellationSignal | None = None,
+    stop_event: threading.Event | None = None,
+):  # noqa: ANN202
+    """Open a request without making cancellation wait for socket timeouts.
+
+    ``urllib`` performs DNS, connect, TLS, and response-header reads in one
+    blocking call. The request remains in the caller thread while a short-lived
+    supervisor shuts down the registered socket on cancellation. This wakes
+    delayed response-header reads without leaving one blocked worker per cancel.
+    """
+    if cancel_event is None and stop_event is None:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _SafeRedirectHandler(),
+        )
+        try:
+            return opener.open(request, timeout=REQUEST_TIMEOUT)
+        except BaseException as exc:
+            _raise_open_error(exc)
+
+    _check_transfer_stop(cancel_event, stop_event)
+    interruptor = _ConnectionInterruptor()
+    opener = _interruptible_opener(interruptor)
+    with _InterruptMonitor(interruptor.interrupt, cancel_event, stop_event):
+        try:
+            response = opener.open(request, timeout=REQUEST_TIMEOUT)
+        except BaseException as exc:
+            _check_transfer_stop(cancel_event, stop_event)
+            _raise_open_error(exc)
+        try:
+            _check_transfer_stop(cancel_event, stop_event)
+        except BaseException:
+            _interrupt_response(response)
+            _close_quietly(response)
+            raise
+        return response
 
 
 def _retry_delay(attempt: int, retry_after: str | None) -> float:
@@ -412,36 +782,42 @@ def _stream_response(
     read_chunk = getattr(response, "read1", response.read)
     window_started = time.monotonic()
     window_bytes = 0
-    while True:
-        _check_transfer_stop(cancel_event, stop_event)
-        try:
-            chunk = read_chunk(CHUNK_SIZE)
-        except (http.client.HTTPException, OSError) as exc:
-            raise _RetryableNetworkError(f"HTTP response interrupted: {exc}") from exc
-        _check_transfer_stop(cancel_event, stop_event)
-        if not chunk:
-            break
-        actual += len(chunk)
-        window_bytes += len(chunk)
-        elapsed = time.monotonic() - window_started
-        if elapsed >= IDLE_TIMEOUT:
-            if window_bytes < CHUNK_SIZE:
-                raise _RetryableNetworkError(
-                    "Transfer stalled below the minimum sustained progress rate"
+    with _InterruptMonitor(
+        lambda: _interrupt_response(response),
+        cancel_event,
+        stop_event,
+    ):
+        while True:
+            _check_transfer_stop(cancel_event, stop_event)
+            try:
+                chunk = read_chunk(CHUNK_SIZE)
+            except (http.client.HTTPException, OSError) as exc:
+                _check_transfer_stop(cancel_event, stop_event)
+                raise _RetryableNetworkError(f"HTTP response interrupted: {exc}") from exc
+            _check_transfer_stop(cancel_event, stop_event)
+            if not chunk:
+                break
+            actual += len(chunk)
+            window_bytes += len(chunk)
+            elapsed = time.monotonic() - window_started
+            if elapsed >= IDLE_TIMEOUT:
+                if window_bytes < CHUNK_SIZE:
+                    raise _RetryableNetworkError(
+                        "Transfer stalled below the minimum sustained progress rate"
+                    )
+                window_started = time.monotonic()
+                window_bytes = 0
+            if expected is not None and actual > expected:
+                raise DownloadValidationError(
+                    f"Response exceeded expected length {expected}"
                 )
-            window_started = time.monotonic()
-            window_bytes = 0
-        if expected is not None and actual > expected:
-            raise DownloadValidationError(
-                f"Response exceeded expected length {expected}"
-            )
-        written = output.write(chunk)
-        if written != len(chunk):
-            raise OSError("Short write while saving download")
-        if digest is not None:
-            digest.update(chunk)
-        if progress is not None and progress_key is not None:
-            progress.update(progress_key, actual)
+            written = output.write(chunk)
+            if written != len(chunk):
+                raise OSError("Short write while saving download")
+            if digest is not None:
+                digest.update(chunk)
+            if progress is not None and progress_key is not None:
+                progress.update(progress_key, actual)
     if expected is not None and actual != expected:
         raise _RetryableTransferError(
             f"Truncated response: expected {expected} bytes, received {actual}"
@@ -456,7 +832,7 @@ def _probe_head(
 ) -> tuple[int | None, bool, str]:
     def attempt() -> tuple[int | None, bool, str]:
         request = _make_request(url, method="HEAD", headers=headers)
-        with _open(request) as response:
+        with _open(request, cancel_event=cancel_event) as response:
             total: int | None
             try:
                 total = _parse_content_length(response.headers)
@@ -480,7 +856,7 @@ def _probe_range(
             headers=headers,
             byte_range=(0, 0),
         )
-        with _open(request) as response:
+        with _open(request, cancel_event=cancel_event) as response:
             status = response.getcode()
             final_url = _final_url(response)
             if status == 200:
@@ -583,7 +959,11 @@ def _segment_attempt(
         headers=headers,
         byte_range=(segment.start, segment.end),
     )
-    with _open(request) as response:
+    with _open(
+        request,
+        cancel_event=cancel_event,
+        stop_event=stop_event,
+    ) as response:
         status = response.getcode()
         if status == 200:
             raise _RangeIgnored("Server ignored a byte-range request")
@@ -719,7 +1099,7 @@ def _single_attempt(
 ) -> tuple[int, str, str]:
     progress.update("single", 0)
     request = _make_request(url, method="GET", headers=headers)
-    with _open(request) as response:
+    with _open(request, cancel_event=cancel_event) as response:
         status = response.getcode()
         if status != 200:
             raise DownloadValidationError(

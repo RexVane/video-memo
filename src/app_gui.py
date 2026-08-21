@@ -390,6 +390,11 @@ class VideoMemoApp(ctk.CTk):
             max_frames = 8
 
         self._busy = True
+        # A new run must not keep pointing at the previous successful report.
+        # Otherwise a failed/cancelled task can still make "重新生成" and
+        # "打开结果文件夹" operate on stale output, while the visible error
+        # text is mistaken for the current summary.
+        self._last_summary_path = None
         cancel_event = threading.Event()
         self._cancel_event = cancel_event
         self.start_btn.configure(state="disabled", text="处理中…")
@@ -465,6 +470,9 @@ class VideoMemoApp(ctk.CTk):
             return
 
         self._busy = True
+        # The selected run directory is captured above for this task. Clear the
+        # previous result pointer now so a later failure cannot resurrect it.
+        self._last_summary_path = None
         cancel_event = threading.Event()
         self._cancel_event = cancel_event
         self.start_btn.configure(state="disabled")
@@ -529,6 +537,7 @@ class VideoMemoApp(ctk.CTk):
                     self.copy_btn.configure(state="normal")
                 elif kind == "error":
                     _, err, tb = item
+                    self._last_summary_path = None
                     self._set_summary(f"出错了：\n\n{err}\n")
                     self._log(tb or err)
                     self.progress.set(0)
@@ -542,7 +551,9 @@ class VideoMemoApp(ctk.CTk):
                     self.start_btn.configure(state="normal", text="开始总结")
                     self.regenerate_btn.configure(state="normal", text="重新生成")
                     self.cancel_btn.configure(state="disabled", text="取消任务")
-                    self.copy_btn.configure(state="normal")
+                    # The textbox contains an error report, not a generated
+                    # summary. Keep copying disabled until a real result lands.
+                    self.copy_btn.configure(state="disabled")
         except Exception as error:
             # A destroyed widget or malformed queue item must not kill the only
             # Tk `after` pump and freeze all future status updates.

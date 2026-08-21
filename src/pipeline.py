@@ -9,10 +9,11 @@ import os
 import re
 import shutil
 import sys
-import time
+import uuid
+from contextlib import ExitStack, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import url2pathname
 
@@ -39,6 +40,14 @@ from version import VERSION
 
 ProgressCb = Callable[[str, float], None]
 JSON_EVENT_PREFIX = "@@VIDEOMEMO@@"
+REGENERATE_LOCK_NAME = ".regenerate.lock"
+RUN_RECOVERY_NAME = ".run.recovery"
+RUN_RECOVERY_COMMITTED_PREFIX = ".run.recovery.committed."
+RUN_RECOVERY_PATHS = ("info.json", "transcript.txt", "summary.md", "frames")
+
+
+class _RunBusyError(RuntimeError):
+    """Raised when another process owns a run directory's operation lock."""
 
 
 def _emit_json_event(event: dict) -> None:
@@ -224,35 +233,106 @@ def _find_reusable_download(
     )
     for info_path in info_files:
         work_dir = info_path.parent
-        info = _read_run_info(work_dir)
-        if not _run_is_complete(work_dir, info):
-            continue
-        result = load_download_result(work_dir)
-        if not result or _url_identity(result.webpage_url) != target_url:
-            continue
-        if local_source and not _local_source_matches(info, local_source):
-            continue
-        if whisper_model is not None and not _transcript_cache_compatible(
+        result = _matching_reusable_download(
             work_dir,
-            info,
+            target_url,
+            local_source=local_source,
             whisper_model=whisper_model,
             language=language,
-        ):
-            if not result.audio_path:
-                continue
-        if require_vision and not _vision_cache_compatible(
-            work_dir,
-            info,
-            result,
+            require_vision=require_vision,
             max_frames=max_frames,
-        ):
-            continue
-        # Atomically claim the completed run before returning it. Without the
-        # claim, two processes can both observe a completed directory and then
-        # overwrite its transcript, frames, or report concurrently.
-        if not _claim_reusable_run(work_dir):
+        )
+        if result is None:
             continue
         return work_dir, result
+    return None
+
+
+def _matching_reusable_download(
+    work_dir: Path,
+    target_url: str,
+    *,
+    local_source: Path | None,
+    whisper_model: str | None,
+    language: str | None,
+    require_vision: bool,
+    max_frames: int,
+) -> DownloadResult | None:
+    info = _read_run_info(work_dir)
+    if not _run_is_complete(work_dir, info):
+        return None
+    result = load_download_result(work_dir)
+    if not result or _url_identity(result.webpage_url) != target_url:
+        return None
+    if local_source and not _local_source_matches(info, local_source):
+        return None
+    if whisper_model is not None and not _transcript_cache_compatible(
+        work_dir,
+        info,
+        whisper_model=whisper_model,
+        language=language,
+    ):
+        if not result.audio_path:
+            return None
+    if require_vision and not _vision_cache_compatible(
+        work_dir,
+        info,
+        result,
+        max_frames=max_frames,
+    ):
+        return None
+    return result
+
+
+def _claim_reusable_download(
+    out_root: Path,
+    webpage_url: str,
+    *,
+    local_source: Path | None = None,
+    whisper_model: str | None = None,
+    language: str | None = None,
+    require_vision: bool = False,
+    max_frames: int = 8,
+) -> tuple[Path, DownloadResult, _RunOperationLock] | None:
+    """Find, recover, snapshot and lock a reusable run until caller release."""
+    if not out_root.is_dir():
+        return None
+    target_url = _url_identity(webpage_url)
+    try:
+        info_files = sorted(
+            out_root.glob("*/info.json"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return None
+    for info_path in info_files:
+        work_dir = info_path.parent
+        lock = _RunOperationLock(work_dir)
+        try:
+            lock.acquire()
+        except (_RunBusyError, FileNotFoundError):
+            continue
+        try:
+            _recover_abandoned_run(work_dir)
+            result = _matching_reusable_download(
+                work_dir,
+                target_url,
+                local_source=local_source,
+                whisper_model=whisper_model,
+                language=language,
+                require_vision=require_vision,
+                max_frames=max_frames,
+            )
+            if result is None:
+                lock.release()
+                continue
+            _prepare_run_recovery(work_dir)
+            _update_run_info(work_dir, "run_status", "running")
+            return work_dir, result, lock
+        except BaseException:
+            lock.release()
+            raise
     return None
 
 
@@ -271,47 +351,19 @@ def _run_is_complete(work_dir: Path, info: dict) -> bool:
     accepted as the legacy completion marker. New runs use an explicit status
     to keep an in-progress directory out of cache discovery.
     """
-    summary_path = work_dir / "summary.md"
-    try:
-        has_summary = summary_path.is_file() and summary_path.stat().st_size > 0
-    except OSError:
-        has_summary = False
+    has_summary = _has_summary(work_dir)
     status = info.get("run_status")
     if status == "complete":
         return has_summary
     return status is None and has_summary
 
 
-def _claim_reusable_run(work_dir: Path) -> bool:
-    """Transition a completed run to ``running`` with an atomic claim file."""
-    claim_path = work_dir / ".run.claim"
-    for _ in range(2):
-        try:
-            with claim_path.open("x", encoding="ascii") as handle:
-                handle.write(str(os.getpid()))
-        except FileExistsError:
-            # A crashed process can leave the tiny claim file behind. Claims
-            # normally live for milliseconds, so an old one is safe to clear.
-            try:
-                if time.time() - claim_path.stat().st_mtime > 300:
-                    claim_path.unlink()
-                    continue
-            except OSError:
-                pass
-            return False
-
-        try:
-            latest = _read_run_info(work_dir)
-            if not _run_is_complete(work_dir, latest):
-                return False
-            _update_run_info(work_dir, "run_status", "running")
-            return True
-        finally:
-            try:
-                claim_path.unlink()
-            except FileNotFoundError:
-                pass
-    return False
+def _has_summary(work_dir: Path) -> bool:
+    summary_path = work_dir / "summary.md"
+    try:
+        return summary_path.is_file() and summary_path.stat().st_size > 0
+    except OSError:
+        return False
 
 
 def _update_run_info(work_dir: Path, key: str, value: object) -> None:
@@ -326,6 +378,281 @@ def _update_run_info(work_dir: Path, key: str, value: object) -> None:
         encoding="utf-8",
     )
     temporary.replace(info_path)
+
+
+def _begin_run_status_recovery(
+    state: dict[str, object] | None,
+    work_dir: Path,
+    *,
+    restore_complete: bool = False,
+) -> None:
+    """Remember the status that must be restored if this attempt aborts."""
+    if state is None or "work_dir" in state:
+        return
+    info = _read_run_info(work_dir)
+    state.update(
+        {
+            "work_dir": work_dir,
+            "previous_status": info.get("run_status"),
+            "restore_complete": restore_complete or _run_is_complete(work_dir, info),
+        }
+    )
+
+
+def _mark_report_committed(state: dict[str, object] | None, work_dir: Path) -> None:
+    if state is not None and state.get("work_dir") == work_dir:
+        state["report_committed"] = True
+
+
+def _restore_run_status_after_error(
+    state: dict[str, object],
+    error: BaseException,
+) -> None:
+    """Restore reused artifacts and never leave a caught failure as running."""
+    work_dir = state.get("work_dir")
+    if not isinstance(work_dir, Path):
+        return
+    recovery_error: BaseException | None = None
+    try:
+        _restore_run_recovery(work_dir)
+    except BaseException as caught:
+        recovery_error = caught
+    # A report may have been committed just before a progress/export callback
+    # raised. Preserve that valid cache even though the outer operation failed.
+    current_info = _read_run_info(work_dir)
+    if _run_is_complete(work_dir, current_info):
+        restored_status = "complete"
+    elif recovery_error is None and state.get("report_committed"):
+        restored_status = "complete"
+    elif recovery_error is None and state.get("restore_complete"):
+        restored_status = "complete"
+    elif isinstance(error, (CancellationRequested, KeyboardInterrupt)):
+        restored_status = "cancelled"
+    else:
+        restored_status = "failed"
+    try:
+        _update_run_info(work_dir, "run_status", restored_status)
+    except BaseException as caught:
+        if recovery_error is None:
+            recovery_error = caught
+    if recovery_error is not None:
+        try:
+            error.add_note(f"运行目录恢复失败: {recovery_error}")
+        except AttributeError:
+            pass
+
+
+class _RunOperationLock:
+    """Crash-safe, non-blocking OS lock for one mutable run directory."""
+
+    def __init__(self, work_dir: Path) -> None:
+        self.work_dir = work_dir
+        self.handle = None
+
+    def acquire(self) -> None:
+        if self.handle is not None:
+            return
+        if not self.work_dir.is_dir():
+            raise RuntimeError(f"运行目录不存在: {self.work_dir}")
+        lock_path = self.work_dir / REGENERATE_LOCK_NAME
+        handle = lock_path.open("a+b")
+        try:
+            try:
+                # Windows byte-range locks need byte 0 to exist. Initialization
+                # can itself collide with an older owner that temporarily
+                # truncated the marker, so translate that race as "busy" too.
+                handle.seek(0, os.SEEK_END)
+                if handle.tell() == 0:
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                raise _RunBusyError(
+                    f"该运行目录正在处理中，请等待当前任务完成: {self.work_dir}"
+                ) from error
+            handle.seek(0)
+            handle.write(b"\0")
+            handle.seek(1)
+            handle.truncate()
+            handle.write(f"{os.getpid()}\n".encode("ascii"))
+            handle.flush()
+        except BaseException:
+            handle.close()
+            raise
+        self.handle = handle
+
+    def release(self) -> None:
+        handle, self.handle = self.handle, None
+        if handle is not None:
+            # Closing releases msvcrt.locking/flock. Do not unlink the marker:
+            # another process may already have opened the same inode.
+            handle.close()
+
+
+def _remove_recovery_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    else:
+        path.unlink(missing_ok=True)
+
+
+def _restore_recovery_file(snapshot: Path, live: Path) -> None:
+    if not snapshot.is_file():
+        live.unlink(missing_ok=True)
+        return
+    temporary = live.with_name(f".{live.name}.{uuid.uuid4().hex}.restore")
+    try:
+        shutil.copy2(snapshot, temporary)
+        os.replace(temporary, live)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _restore_recovery_directory(snapshot: Path, live: Path) -> None:
+    if not snapshot.is_dir():
+        _remove_recovery_path(live)
+        return
+    staged = live.with_name(f".{live.name}.{uuid.uuid4().hex}.restore")
+    discarded: Path | None = None
+    try:
+        shutil.copytree(snapshot, staged)
+        if live.exists():
+            discarded = live.with_name(f".{live.name}.{uuid.uuid4().hex}.discard")
+            os.replace(live, discarded)
+        try:
+            os.replace(staged, live)
+        except BaseException:
+            if discarded is not None and discarded.exists() and not live.exists():
+                os.replace(discarded, live)
+                discarded = None
+            raise
+    finally:
+        if staged.exists():
+            _remove_recovery_path(staged)
+        if discarded is not None and discarded.exists():
+            _remove_recovery_path(discarded)
+
+
+def _discard_run_recovery(work_dir: Path, recovery: Path) -> None:
+    """Atomically retire a snapshot before best-effort recursive cleanup."""
+    committed = work_dir / f"{RUN_RECOVERY_COMMITTED_PREFIX}{uuid.uuid4().hex}"
+    os.replace(recovery, committed)
+    try:
+        _remove_recovery_path(committed)
+    except OSError:
+        # A partially deleted tombstone is never replayed as a recovery source.
+        # The next owner will retry its cleanup without touching live artifacts.
+        pass
+
+
+def _restore_run_recovery(work_dir: Path) -> bool:
+    """Restore an interrupted cache mutation; return whether one was found."""
+    recovery = work_dir / RUN_RECOVERY_NAME
+    if not recovery.exists():
+        return False
+    if not recovery.is_dir():
+        raise RuntimeError(f"运行恢复路径不是目录: {recovery}")
+    if (recovery / ".committed").is_file():
+        _discard_run_recovery(work_dir, recovery)
+        return True
+
+    # ``summary.md`` is atomically replaced before the status is set complete.
+    # If termination lands just before the recovery directory is renamed to its
+    # committed tombstone, the complete status proves the new generation won.
+    current_info = _read_run_info(work_dir)
+    if current_info.get("run_status") == "complete" and _run_is_complete(
+        work_dir, current_info
+    ):
+        _discard_run_recovery(work_dir, recovery)
+        return True
+
+    # Restore info last so a crash during recovery cannot expose a complete
+    # status before transcript/report/frames are back to the same generation.
+    for name in ("transcript.txt", "summary.md"):
+        _restore_recovery_file(recovery / name, work_dir / name)
+    _restore_recovery_directory(recovery / "frames", work_dir / "frames")
+    _restore_recovery_file(recovery / "info.json", work_dir / "info.json")
+    _discard_run_recovery(work_dir, recovery)
+    return True
+
+
+def _repair_abandoned_run_status(work_dir: Path) -> None:
+    info = _read_run_info(work_dir)
+    if info.get("run_status") != "running":
+        return
+    has_summary = _has_summary(work_dir)
+    _update_run_info(work_dir, "run_status", "complete" if has_summary else "failed")
+
+
+def _recover_abandoned_run(work_dir: Path) -> None:
+    """Recover state left after a process was terminated without ``finally``."""
+    _restore_run_recovery(work_dir)
+    for stale in work_dir.glob(f"{RUN_RECOVERY_NAME}.*.tmp"):
+        try:
+            _remove_recovery_path(stale)
+        except OSError:
+            pass
+    for committed in work_dir.glob(f"{RUN_RECOVERY_COMMITTED_PREFIX}*"):
+        try:
+            _remove_recovery_path(committed)
+        except OSError:
+            pass
+    _repair_abandoned_run_status(work_dir)
+
+
+def _prepare_run_recovery(work_dir: Path) -> None:
+    """Snapshot mutable completed artifacts before reusing their directory."""
+    recovery = work_dir / RUN_RECOVERY_NAME
+    if recovery.exists():
+        raise RuntimeError(f"运行目录仍有未处理的恢复快照: {recovery}")
+    staged = work_dir / f"{RUN_RECOVERY_NAME}.{uuid.uuid4().hex}.tmp"
+    staged.mkdir()
+    try:
+        for name in RUN_RECOVERY_PATHS:
+            source = work_dir / name
+            target = staged / name
+            if source.is_dir() and not source.is_symlink():
+                shutil.copytree(source, target)
+            elif source.is_file():
+                shutil.copy2(source, target)
+        os.replace(staged, recovery)
+    finally:
+        if staged.exists():
+            _remove_recovery_path(staged)
+
+
+def _commit_run_recovery(work_dir: Path) -> None:
+    """Commit reused artifacts before optional exports or cleanup callbacks."""
+    recovery = work_dir / RUN_RECOVERY_NAME
+    if not recovery.is_dir():
+        return
+    # Retiring the snapshot is the commit point. A rename failure reaches the
+    # outer wrapper and restores the previous generation.
+    _discard_run_recovery(work_dir, recovery)
+
+
+@contextmanager
+def _regenerate_lock(work_dir: Path) -> Iterator[None]:
+    """Hold the shared per-run operation lock for report regeneration."""
+    lock = _RunOperationLock(work_dir)
+    try:
+        lock.acquire()
+    except _RunBusyError as error:
+        raise RuntimeError(
+            f"该运行目录正在重新生成或处理，请等待当前任务完成: {work_dir}"
+        ) from error
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _language_matches(stored: object, requested: str | None) -> bool:
@@ -435,6 +762,55 @@ def regenerate_report(
     on_progress: ProgressCb | None = None,
     cancel_event: CancellationSignal | None = None,
 ) -> Path:
+    status_recovery: dict[str, object] = {}
+    with _regenerate_lock(work_dir):
+        _recover_abandoned_run(work_dir)
+        info = _read_run_info(work_dir)
+        restore_complete = _run_is_complete(work_dir, info)
+        _begin_run_status_recovery(
+            status_recovery,
+            work_dir,
+            restore_complete=restore_complete,
+        )
+        # A failed directory may still contain an older report. Snapshot every
+        # regeneration attempt so failure or taskkill cannot promote that stale
+        # file to the current attempt's result.
+        _prepare_run_recovery(work_dir)
+        try:
+            return _regenerate_report(
+                work_dir,
+                llm_model=llm_model,
+                api_key=api_key,
+                api_base_url=api_base_url,
+                obsidian_vault=obsidian_vault,
+                obsidian_folder=obsidian_folder,
+                on_progress=on_progress,
+                cancel_event=cancel_event,
+                _status_recovery=status_recovery,
+            )
+        except BaseException as error:
+            try:
+                _restore_run_status_after_error(status_recovery, error)
+            except BaseException as restore_error:
+                try:
+                    error.add_note(f"运行目录恢复失败: {restore_error}")
+                except AttributeError:
+                    pass
+            raise
+
+
+def _regenerate_report(
+    work_dir: Path,
+    *,
+    llm_model: str | None = None,
+    api_key: str | None = None,
+    api_base_url: str | None = None,
+    obsidian_vault: Path | None = None,
+    obsidian_folder: str = "",
+    on_progress: ProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
+    _status_recovery: dict[str, object] | None = None,
+) -> Path:
     check_cancelled(cancel_event)
     dl = load_download_result(work_dir)
     if not dl:
@@ -474,6 +850,12 @@ def regenerate_report(
         cancel_event=cancel_event,
     )
     summary_path = _write_reports(work_dir, dl, summary.body)
+    # ``run_status`` tracks whether the reusable local report is complete.
+    # Optional exports may still fail and surface to the caller, but must not
+    # poison a report that was already committed successfully.
+    _commit_run_recovery(work_dir)
+    _mark_report_committed(_status_recovery, work_dir)
+    _update_run_info(work_dir, "run_status", "complete")
     if obsidian_vault:
         note_path = export_to_vault(
             summary_path,
@@ -484,7 +866,6 @@ def regenerate_report(
             topic=summary.topic,
         )
         progress(f"OBSIDIAN_NOTE={note_path}", 0.98)
-    _update_run_info(work_dir, "run_status", "complete")
     progress(f"报告已保存: {summary_path}", 1.0)
     return summary_path
 
@@ -507,7 +888,87 @@ def run(
     obsidian_folder: str = "",
     on_progress: ProgressCb | None = None,
     cancel_event: CancellationSignal | None = None,
+    _status_recovery: dict[str, object] | None = None,
 ) -> Path:
+    status_recovery: dict[str, object] = {}
+    operation_stack = ExitStack()
+    try:
+        return _run(
+            url,
+            out_root=out_root,
+            whisper_model=whisper_model,
+            language=language,
+            max_frames=max_frames,
+            no_vision=no_vision,
+            llm_model=llm_model,
+            api_key=api_key,
+            api_base_url=api_base_url,
+            cookies_from_browser=cookies_from_browser,
+            cookies_file=cookies_file,
+            cleanup_media=cleanup_media,
+            obsidian_vault=obsidian_vault,
+            obsidian_folder=obsidian_folder,
+            on_progress=on_progress,
+            cancel_event=cancel_event,
+            _status_recovery=status_recovery,
+            _operation_stack=operation_stack,
+        )
+    except BaseException as error:
+        try:
+            _restore_run_status_after_error(status_recovery, error)
+        except BaseException as restore_error:
+            # Recovery must never hide the original pipeline exception. Keep a
+            # diagnostic note when the runtime supports it.
+            try:
+                error.add_note(f"运行目录恢复失败: {restore_error}")
+            except AttributeError:
+                pass
+        raise
+    finally:
+        operation_stack.close()
+
+
+def _run(*args, _operation_stack: ExitStack | None = None, **kwargs) -> Path:
+    """Run one pipeline attempt and release its operation lock on direct calls."""
+    own_stack = _operation_stack is None
+    stack = _operation_stack or ExitStack()
+    try:
+        return _run_impl(*args, _operation_stack=stack, **kwargs)
+    finally:
+        if own_stack:
+            stack.close()
+
+
+def _run_impl(
+    url: str,
+    *,
+    out_root: Path,
+    whisper_model: str = "base",
+    language: str | None = None,
+    max_frames: int = 8,
+    no_vision: bool = False,
+    llm_model: str | None = None,
+    api_key: str | None = None,
+    api_base_url: str | None = None,
+    cookies_from_browser: str | None = None,
+    cookies_file: Path | None = None,
+    cleanup_media: bool = False,
+    obsidian_vault: Path | None = None,
+    obsidian_folder: str = "",
+    on_progress: ProgressCb | None = None,
+    cancel_event: CancellationSignal | None = None,
+    _status_recovery: dict[str, object] | None = None,
+    _operation_stack: ExitStack | None = None,
+) -> Path:
+    if _operation_stack is None:
+        _operation_stack = ExitStack()
+
+    def acquire_operation_lock(work_dir: Path) -> _RunOperationLock:
+        lock = _RunOperationLock(work_dir)
+        lock.acquire()
+        _operation_stack.callback(lock.release)
+        return lock
+
     def progress(msg: str, pct: float) -> None:
         print(msg)
         if on_progress:
@@ -530,7 +991,7 @@ def run(
 
     if local_source:
         progress(f"[1/4] 使用本地文件: {local_source}", 0.02)
-        reusable = _find_reusable_download(
+        reusable = _claim_reusable_download(
             out_root,
             local_source.as_uri(),
             local_source=local_source,
@@ -540,10 +1001,18 @@ def run(
             max_frames=max_frames,
         )
         if reusable:
-            work, dl = reusable
+            work, dl, lock = reusable
+            _operation_stack.callback(lock.release)
+            _begin_run_status_recovery(
+                _status_recovery,
+                work,
+                restore_complete=True,
+            )
             progress(f"[1/4] 复用已有处理结果\n  工作目录: {work}", 0.25)
         else:
             work = _work_dir(out_root, local_source.stem)
+            acquire_operation_lock(work)
+            _begin_run_status_recovery(_status_recovery, work)
             progress(f"[1/4] 提取音轨…\n  工作目录: {work}", 0.05)
             import_kwargs = (
                 {"cancel_event": cancel_event} if cancel_event is not None else {}
@@ -559,7 +1028,7 @@ def run(
             language=language,
             cancel_event=cancel_event,
         )
-        reusable = _find_reusable_download(
+        reusable = _claim_reusable_download(
             out_root,
             metadata.webpage_url,
             whisper_model=whisper_model,
@@ -568,10 +1037,18 @@ def run(
             max_frames=max_frames,
         )
         if reusable:
-            work, dl = reusable
+            work, dl, lock = reusable
+            _operation_stack.callback(lock.release)
+            _begin_run_status_recovery(
+                _status_recovery,
+                work,
+                restore_complete=True,
+            )
             progress(f"[1/4] 复用已有处理结果\n  工作目录: {work}", 0.25)
         else:
             work = _work_dir(out_root, metadata.title)
+            acquire_operation_lock(work)
+            _begin_run_status_recovery(_status_recovery, work)
             progress(f"[1/4] 下载视频…\n  工作目录: {work}", 0.05)
             dl = download(
                 url,
@@ -585,6 +1062,7 @@ def run(
                     else {}
                 ),
             )
+    _begin_run_status_recovery(_status_recovery, work)
     check_cancelled(cancel_event)
     _update_run_info(work, "run_status", "running")
     progress(f"  标题: {dl.title}", 0.25)
@@ -769,6 +1247,9 @@ def run(
     )
     check_cancelled(cancel_event)
     summary_path = _write_reports(work, dl, summary.body)
+    _commit_run_recovery(work)
+    _mark_report_committed(_status_recovery, work)
+    _update_run_info(work, "run_status", "complete")
     if obsidian_vault:
         note_path = export_to_vault(
             summary_path,
@@ -786,7 +1267,6 @@ def run(
             f"{removed_bytes / (1024 * 1024):.1f} MB",
             0.96,
         )
-    _update_run_info(work, "run_status", "complete")
     progress("\n" + "=" * 60, 0.97)
     progress("=" * 60, 0.98)
     progress(f"\n详细总结: {summary_path}", 1.0)

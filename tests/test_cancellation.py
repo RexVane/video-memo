@@ -8,7 +8,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
@@ -85,6 +85,45 @@ class RunCommandTests(unittest.TestCase):
             self.assertLess(time.monotonic() - started, 4)
         finally:
             timer.cancel()
+
+    def test_windows_taskkill_failure_falls_back_to_process_handle(self) -> None:
+        event = threading.Event()
+        process = Mock(pid=1234, returncode=-9)
+        communicate_calls = 0
+
+        def communicate(*args, **kwargs):
+            nonlocal communicate_calls
+            communicate_calls += 1
+            if communicate_calls == 1:
+                event.set()
+                raise subprocess.TimeoutExpired(["fake-command"], 0.2)
+            return b"", b""
+
+        process.communicate = Mock(side_effect=communicate)
+        taskkill_result = SimpleNamespace(returncode=1)
+        with (
+            patch.object(cancellation.sys, "platform", "win32"),
+            patch.object(cancellation.subprocess, "Popen", return_value=process),
+            patch.object(
+                cancellation.subprocess,
+                "run",
+                return_value=taskkill_result,
+            ) as taskkill,
+        ):
+            with self.assertRaises(cancellation.CancellationRequested):
+                cancellation.run_command(
+                    ["fake-command"],
+                    cancel_event=event,
+                    run=subprocess.run,
+                    capture_output=True,
+                )
+
+        process.kill.assert_called_once_with()
+        taskkill.assert_called_once_with(
+            ["taskkill", "/pid", "1234", "/T", "/F"],
+            capture_output=True,
+            timeout=2,
+        )
 
 
 class FramesCancellationTests(unittest.TestCase):

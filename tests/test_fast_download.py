@@ -32,6 +32,8 @@ class _Scenario:
         self.requests: list[tuple[str, str, dict[str, str]]] = []
         self.range_headers: list[str] = []
         self.base_url = ""
+        self.headers_waiting = threading.Event()
+        self.release_headers = threading.Event()
 
     def record(self, method: str, path: str, headers) -> int:  # noqa: ANN001
         with self.lock:
@@ -100,6 +102,14 @@ def _serve(mode: str = "normal"):
             call_number = scenario.record("GET", self.path, self.headers)
             if self.path == "/redirect":
                 self._redirect()
+                return
+            if scenario.mode == "delay-headers":
+                scenario.headers_waiting.set()
+                scenario.release_headers.wait(5)
+                try:
+                    self._full_response()
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
                 return
 
             range_header = self.headers.get("Range")
@@ -187,6 +197,7 @@ def _serve(mode: str = "normal"):
     try:
         yield scenario
     finally:
+        scenario.release_headers.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
@@ -376,6 +387,108 @@ class FastDownloadTests(unittest.TestCase):
 
             self.assertEqual(destination.read_bytes(), b"old file")
             self.assert_no_staging_files(root, destination)
+
+    def test_cancellation_interrupts_wait_for_response_headers(self) -> None:
+        with _serve("delay-headers") as server:
+            for _attempt in range(3):
+                server.headers_waiting.clear()
+                cancel_event = threading.Event()
+
+                def cancel_after_request() -> None:
+                    if server.headers_waiting.wait(1):
+                        cancel_event.set()
+
+                canceller = threading.Thread(target=cancel_after_request)
+                canceller.start()
+                started = time.monotonic()
+                with self.assertRaises(CancellationRequested):
+                    fast_download._open(
+                        fast_download._make_request(
+                            f"{server.base_url}/file",
+                            method="GET",
+                            headers={},
+                        ),
+                        cancel_event=cancel_event,
+                    )
+                canceller.join(timeout=1)
+
+                self.assertFalse(canceller.is_alive())
+                self.assertLess(time.monotonic() - started, 1.0)
+                self.assertFalse(
+                    any(
+                        thread.is_alive()
+                        and thread.name in {"http-open", "http-read", "http-cancel"}
+                        for thread in threading.enumerate()
+                    )
+                )
+
+    def test_uncancelled_request_can_wait_for_response_headers(self) -> None:
+        with _serve("delay-headers") as server:
+            cancel_event = threading.Event()
+
+            def release_after_request() -> None:
+                if server.headers_waiting.wait(1):
+                    time.sleep(0.2)
+                    server.release_headers.set()
+
+            releaser = threading.Thread(target=release_after_request)
+            releaser.start()
+            with fast_download._open(
+                fast_download._make_request(
+                    f"{server.base_url}/file",
+                    method="GET",
+                    headers={},
+                ),
+                cancel_event=cancel_event,
+            ) as response:
+                self.assertEqual(response.read(), DATA)
+            releaser.join(timeout=1)
+
+            self.assertFalse(releaser.is_alive())
+
+    def test_cancellation_interrupts_wait_for_next_response_chunk(self) -> None:
+        cancel_event = threading.Event()
+        entered = threading.Event()
+        release = threading.Event()
+
+        class BlockingResponse:
+            def read(self, size: int) -> bytes:
+                del size
+                entered.set()
+                release.wait(2)
+                return b""
+
+            def close(self) -> None:
+                release.set()
+
+        response = BlockingResponse()
+        timer = threading.Timer(0.1, cancel_event.set)
+        timer.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(CancellationRequested):
+                fast_download._stream_response(
+                    response,
+                    fast_download._DiscardWriter(),
+                    expected=None,
+                    cancel_event=cancel_event,
+                    stop_event=None,
+                    progress=None,
+                    progress_key=None,
+                )
+        finally:
+            release.set()
+            timer.cancel()
+
+        self.assertTrue(entered.is_set())
+        self.assertLess(time.monotonic() - started, 1.0)
+        self.assertFalse(
+            any(
+                thread.is_alive()
+                and thread.name in {"http-open", "http-read", "http-cancel"}
+                for thread in threading.enumerate()
+            )
+        )
 
     def test_sensitive_headers_are_filtered_and_cross_host_headers_are_dropped(self) -> None:
         with _serve() as server, tempfile.TemporaryDirectory() as tmp:

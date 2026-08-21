@@ -14,6 +14,7 @@ SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 sys.path.insert(0, str(SRC_DIR))
 
 import pipeline  # noqa: E402
+from cancellation import CancellationRequested  # noqa: E402
 from download import BrowserCookieError, DownloadResult, VideoMetadata  # noqa: E402
 from llm_config import LLMConfig  # noqa: E402
 from summarize import SummarizeResult  # noqa: E402
@@ -147,10 +148,11 @@ class PipelineTests(unittest.TestCase):
 
             self.assertIsNotNone(reusable)
             self.assertEqual(reusable[0], work)
-            self.assertIsNone(
+            self.assertEqual(
                 pipeline._find_reusable_download(
                     root, "https://example.test/v?id=1"
-                )
+                )[0],
+                work,
             )
 
     def test_find_reusable_download_rejects_in_progress_run(self) -> None:
@@ -179,6 +181,523 @@ class PipelineTests(unittest.TestCase):
                     root, "https://example.test/v?id=2"
                 )
             )
+
+    def test_failed_reuse_restores_completed_run_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp) / "completed"
+            work.mkdir()
+            audio = work / "audio.wav"
+            audio.write_bytes(b"RIFF" + (b"0" * 64))
+            (work / "transcript.txt").write_text("[00:00] transcript", encoding="utf-8")
+            (work / "summary.md").write_text("previous report", encoding="utf-8")
+            (work / "info.json").write_text(
+                json.dumps(
+                    {
+                        "title": "Course",
+                        "webpage_url": "https://example.test/v?id=3",
+                        "video_path": None,
+                        "audio_path": str(audio),
+                        "run_status": "complete",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state: dict[str, object] = {}
+            with pipeline._regenerate_lock(work):
+                pipeline._prepare_run_recovery(work)
+                pipeline._update_run_info(work, "run_status", "running")
+            pipeline._begin_run_status_recovery(state, work, restore_complete=True)
+            pipeline._restore_run_status_after_error(state, RuntimeError("LLM failed"))
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "complete")
+            self.assertTrue(pipeline._run_is_complete(work, info))
+
+    def test_failed_reuse_restores_matching_report_transcript_and_frames(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mp3"
+            source.write_bytes(b"source media")
+            source_stat = source.stat()
+            output = root / "output"
+            work = output / "completed"
+            frames = work / "frames"
+            frames.mkdir(parents=True)
+            audio = work / "audio.wav"
+            audio.write_bytes(b"RIFF" + (b"0" * 64))
+            (work / "transcript.txt").write_text("old transcript", encoding="utf-8")
+            (work / "summary.md").write_text("old report", encoding="utf-8")
+            (frames / "frame_001.jpg").write_bytes(b"old frame")
+            original_info = {
+                "title": "Lecture",
+                "webpage_url": source.resolve().as_uri(),
+                "video_path": None,
+                "audio_path": str(audio),
+                "media_has_video": False,
+                "source_fingerprint": {
+                    "size": source_stat.st_size,
+                    "mtime_ns": source_stat.st_mtime_ns,
+                },
+                "transcript": {
+                    "source": "whisper",
+                    "model": "base",
+                    "language": "en",
+                    "requested_language": None,
+                },
+                "run_status": "complete",
+            }
+            (work / "info.json").write_text(
+                json.dumps(original_info, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                pipeline.shutil, "which", return_value="tool"
+            ), patch.object(
+                pipeline,
+                "resolve_llm_config",
+                return_value=LLMConfig("key", "https://api.example.test/v1", "test"),
+            ), patch.object(
+                pipeline,
+                "transcribe",
+                return_value=Transcript(
+                    language="en",
+                    text="new transcript",
+                    segments=[],
+                ),
+            ), patch.object(
+                pipeline, "summarize", side_effect=RuntimeError("LLM failed")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "LLM failed"):
+                    pipeline.run(
+                        str(source),
+                        out_root=output,
+                        whisper_model="small",
+                        no_vision=True,
+                    )
+
+            self.assertEqual(
+                (work / "transcript.txt").read_text(encoding="utf-8"),
+                "old transcript",
+            )
+            self.assertEqual(
+                (work / "summary.md").read_text(encoding="utf-8"),
+                "old report",
+            )
+            self.assertEqual((frames / "frame_001.jpg").read_bytes(), b"old frame")
+            self.assertEqual(
+                json.loads((work / "info.json").read_text(encoding="utf-8")),
+                original_info,
+            )
+            self.assertFalse((work / pipeline.RUN_RECOVERY_NAME).exists())
+
+    def test_next_owner_recovers_snapshot_left_by_forced_termination(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            frames = work / "frames"
+            frames.mkdir()
+            original_info = {"title": "Course", "run_status": "complete"}
+            (work / "info.json").write_text(
+                json.dumps(original_info),
+                encoding="utf-8",
+            )
+            (work / "transcript.txt").write_text("old transcript", encoding="utf-8")
+            (work / "summary.md").write_text("old report", encoding="utf-8")
+            (frames / "frame_001.jpg").write_bytes(b"old frame")
+
+            with pipeline._regenerate_lock(work):
+                pipeline._prepare_run_recovery(work)
+                (work / "transcript.txt").write_text(
+                    "partial transcript",
+                    encoding="utf-8",
+                )
+                (work / "summary.md").write_text("old report", encoding="utf-8")
+                (frames / "frame_001.jpg").write_bytes(b"partial frame")
+                pipeline._update_run_info(work, "run_status", "running")
+
+            with pipeline._regenerate_lock(work):
+                pipeline._recover_abandoned_run(work)
+
+            self.assertEqual(
+                (work / "transcript.txt").read_text(encoding="utf-8"),
+                "old transcript",
+            )
+            self.assertEqual((frames / "frame_001.jpg").read_bytes(), b"old frame")
+            self.assertEqual(
+                json.loads((work / "info.json").read_text(encoding="utf-8")),
+                original_info,
+            )
+            self.assertFalse((work / pipeline.RUN_RECOVERY_NAME).exists())
+
+    def test_abandoned_running_status_is_repaired_without_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "info.json").write_text(
+                json.dumps({"title": "Course", "run_status": "running"}),
+                encoding="utf-8",
+            )
+            (work / "summary.md").write_text("complete report", encoding="utf-8")
+
+            with pipeline._regenerate_lock(work):
+                pipeline._recover_abandoned_run(work)
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "complete")
+
+    def test_complete_status_commits_recovery_snapshot_after_forced_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "info.json").write_text(
+                json.dumps({"title": "Course", "run_status": "complete"}),
+                encoding="utf-8",
+            )
+            (work / "summary.md").write_text("old report", encoding="utf-8")
+            pipeline._prepare_run_recovery(work)
+            (work / "summary.md").write_text("new report", encoding="utf-8")
+
+            with pipeline._regenerate_lock(work):
+                pipeline._recover_abandoned_run(work)
+
+            self.assertEqual(
+                (work / "summary.md").read_text(encoding="utf-8"),
+                "new report",
+            )
+            self.assertFalse((work / pipeline.RUN_RECOVERY_NAME).exists())
+
+    def test_failed_regeneration_does_not_promote_stale_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            audio = work / "audio.wav"
+            audio.write_bytes(b"RIFF" + (b"0" * 64))
+            (work / "transcript.txt").write_text("transcript", encoding="utf-8")
+            (work / "summary.md").write_text("stale report", encoding="utf-8")
+            (work / "info.json").write_text(
+                json.dumps(
+                    {
+                        "title": "Course",
+                        "webpage_url": "https://example.test/course",
+                        "video_path": None,
+                        "audio_path": str(audio),
+                        "run_status": "failed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(
+                pipeline,
+                "resolve_llm_config",
+                return_value=LLMConfig("key", "https://api.example.test/v1", "test"),
+            ), patch.object(
+                pipeline, "summarize", side_effect=RuntimeError("LLM failed")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "LLM failed"):
+                    pipeline.regenerate_report(work)
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "failed")
+            self.assertEqual(
+                (work / "summary.md").read_text(encoding="utf-8"),
+                "stale report",
+            )
+
+    def test_forced_exit_does_not_promote_stale_failed_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "info.json").write_text(
+                json.dumps({"title": "Course", "run_status": "failed"}),
+                encoding="utf-8",
+            )
+            (work / "summary.md").write_text("stale report", encoding="utf-8")
+
+            with pipeline._regenerate_lock(work):
+                pipeline._prepare_run_recovery(work)
+                pipeline._update_run_info(work, "run_status", "running")
+
+            with pipeline._regenerate_lock(work):
+                pipeline._recover_abandoned_run(work)
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "failed")
+            self.assertEqual(
+                (work / "summary.md").read_text(encoding="utf-8"),
+                "stale report",
+            )
+
+    def test_recovery_failure_does_not_hide_original_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "info.json").write_text(
+                json.dumps({"title": "Course", "run_status": "running"}),
+                encoding="utf-8",
+            )
+            state: dict[str, object] = {}
+            pipeline._begin_run_status_recovery(
+                state,
+                work,
+                restore_complete=True,
+            )
+            original = RuntimeError("LLM failed")
+
+            with patch.object(
+                pipeline,
+                "_restore_run_recovery",
+                side_effect=OSError("restore failed"),
+            ):
+                pipeline._restore_run_status_after_error(state, original)
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "failed")
+            self.assertTrue(
+                any("restore failed" in note for note in getattr(original, "__notes__", []))
+            )
+
+    def test_recovery_cleanup_failure_keeps_restored_complete_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "info.json").write_text(
+                json.dumps({"title": "Course", "run_status": "complete"}),
+                encoding="utf-8",
+            )
+            (work / "summary.md").write_text("old report", encoding="utf-8")
+            state: dict[str, object] = {}
+            pipeline._begin_run_status_recovery(
+                state,
+                work,
+                restore_complete=True,
+            )
+            pipeline._prepare_run_recovery(work)
+            pipeline._update_run_info(work, "run_status", "running")
+            (work / "summary.md").write_text("partial report", encoding="utf-8")
+            original_remove = pipeline._remove_recovery_path
+
+            def fail_snapshot_cleanup(path: Path) -> None:
+                if path.name.startswith(pipeline.RUN_RECOVERY_COMMITTED_PREFIX):
+                    (path / "summary.md").unlink()
+                    raise PermissionError("snapshot cleanup blocked")
+                original_remove(path)
+
+            original = RuntimeError("LLM failed")
+            with patch.object(
+                pipeline,
+                "_remove_recovery_path",
+                side_effect=fail_snapshot_cleanup,
+            ):
+                pipeline._restore_run_status_after_error(state, original)
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "complete")
+            self.assertEqual(
+                (work / "summary.md").read_text(encoding="utf-8"),
+                "old report",
+            )
+            self.assertFalse((work / pipeline.RUN_RECOVERY_NAME).exists())
+            self.assertEqual(
+                len(list(work.glob(f"{pipeline.RUN_RECOVERY_COMMITTED_PREFIX}*"))),
+                1,
+            )
+
+            pipeline._recover_abandoned_run(work)
+
+            self.assertEqual(
+                (work / "summary.md").read_text(encoding="utf-8"),
+                "old report",
+            )
+            self.assertFalse(
+                list(work.glob(f"{pipeline.RUN_RECOVERY_COMMITTED_PREFIX}*"))
+            )
+
+    def test_recovery_commit_rename_failure_rolls_back_old_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            original_info = {"title": "Course", "run_status": "complete"}
+            (work / "info.json").write_text(
+                json.dumps(original_info),
+                encoding="utf-8",
+            )
+            (work / "summary.md").write_text("old report", encoding="utf-8")
+            state: dict[str, object] = {}
+            pipeline._begin_run_status_recovery(
+                state,
+                work,
+                restore_complete=True,
+            )
+            pipeline._prepare_run_recovery(work)
+            pipeline._update_run_info(work, "run_status", "running")
+            (work / "summary.md").write_text("new report", encoding="utf-8")
+
+            original_replace = pipeline.os.replace
+
+            def fail_recovery_commit(source, target):  # noqa: ANN001
+                if Path(source).name == pipeline.RUN_RECOVERY_NAME:
+                    raise OSError("commit rename failed")
+                return original_replace(source, target)
+
+            with patch.object(pipeline.os, "replace", side_effect=fail_recovery_commit):
+                with self.assertRaisesRegex(OSError, "commit rename failed"):
+                    pipeline._commit_run_recovery(work)
+
+            original = RuntimeError("commit rename failed")
+            pipeline._restore_run_status_after_error(state, original)
+
+            self.assertEqual(
+                (work / "summary.md").read_text(encoding="utf-8"),
+                "old report",
+            )
+            self.assertEqual(
+                json.loads((work / "info.json").read_text(encoding="utf-8")),
+                original_info,
+            )
+
+    def test_error_after_report_commit_keeps_complete_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "info.json").write_text(
+                json.dumps({"title": "Course", "run_status": "running"}),
+                encoding="utf-8",
+            )
+            (work / "summary.md").write_text("new report", encoding="utf-8")
+            state: dict[str, object] = {}
+            pipeline._begin_run_status_recovery(state, work)
+            pipeline._mark_report_committed(state, work)
+
+            pipeline._restore_run_status_after_error(
+                state,
+                RuntimeError("Obsidian export failed"),
+            )
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "complete")
+
+    def test_reusable_run_lock_also_blocks_regeneration(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "completed"
+            work.mkdir()
+            audio = work / "audio.wav"
+            audio.write_bytes(b"RIFF" + (b"0" * 64))
+            (work / "summary.md").write_text("old report", encoding="utf-8")
+            (work / "info.json").write_text(
+                json.dumps(
+                    {
+                        "title": "Course",
+                        "webpage_url": "https://example.test/course",
+                        "video_path": None,
+                        "audio_path": str(audio),
+                        "run_status": "complete",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            claimed = pipeline._claim_reusable_download(
+                root,
+                "https://example.test/course",
+            )
+            self.assertIsNotNone(claimed)
+            _claimed_work, _result, lock = claimed
+            try:
+                with self.assertRaisesRegex(RuntimeError, "正在重新生成或处理"):
+                    with pipeline._regenerate_lock(work):
+                        pass
+            finally:
+                lock.release()
+
+    def test_failed_new_run_records_failed_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "lecture.mp3"
+            source.write_bytes(b"media")
+            output = root / "output"
+
+            def fake_import(path: Path, work: Path) -> DownloadResult:
+                audio = work / "audio.wav"
+                audio.write_bytes(b"RIFF" + (b"0" * 64))
+                source_stat = path.stat()
+                (work / "info.json").write_text(
+                    json.dumps(
+                        {
+                            "title": path.stem,
+                            "webpage_url": path.as_uri(),
+                            "video_path": None,
+                            "audio_path": str(audio),
+                            "source_fingerprint": {
+                                "size": source_stat.st_size,
+                                "mtime_ns": source_stat.st_mtime_ns,
+                            },
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return DownloadResult(
+                    video_path=None,
+                    audio_path=audio,
+                    title=path.stem,
+                    duration=1,
+                    webpage_url=path.as_uri(),
+                    description="",
+                    uploader="",
+                )
+
+            with patch.object(
+                pipeline.shutil, "which", return_value="tool"
+            ), patch.object(
+                pipeline,
+                "resolve_llm_config",
+                return_value=LLMConfig("key", "https://api.example.test/v1", "test"),
+            ), patch.object(
+                pipeline, "import_local_media", side_effect=fake_import
+            ), patch.object(
+                pipeline,
+                "transcribe",
+                return_value=Transcript(language="en", text="[00:00] text", segments=[]),
+            ), patch.object(
+                pipeline, "summarize", side_effect=RuntimeError("LLM failed")
+            ):
+                with self.assertRaisesRegex(RuntimeError, "LLM failed"):
+                    pipeline.run(str(source), out_root=output, no_vision=True)
+
+            work = next(output.iterdir())
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "failed")
+
+    def test_cancelled_new_run_records_cancelled_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "info.json").write_text(
+                json.dumps({"title": "Course", "run_status": "running"}),
+                encoding="utf-8",
+            )
+            state: dict[str, object] = {}
+            pipeline._begin_run_status_recovery(state, work)
+
+            pipeline._restore_run_status_after_error(
+                state,
+                CancellationRequested("cancelled"),
+            )
+
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["run_status"], "cancelled")
+
+    def test_regenerate_lock_rejects_concurrent_owner_and_releases(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            with pipeline._regenerate_lock(work):
+                self.assertTrue((work / pipeline.REGENERATE_LOCK_NAME).is_file())
+                with self.assertRaisesRegex(RuntimeError, "正在重新生成"):
+                    with pipeline._regenerate_lock(work):
+                        pass
+            with pipeline._regenerate_lock(work):
+                pass
+
+    def test_regenerate_lock_ignores_stale_marker_from_crashed_process(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            lock_path = work / pipeline.REGENERATE_LOCK_NAME
+            lock_path.write_text("999999999\n", encoding="ascii")
+
+            with pipeline._regenerate_lock(work):
+                self.assertTrue(lock_path.is_file())
 
     def test_local_cache_is_rejected_after_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

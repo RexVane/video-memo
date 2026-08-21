@@ -64,11 +64,23 @@ def run_command(
             timed_out = timeout is not None and time.monotonic() - started >= timeout
             if cancel_event.is_set() or timed_out:
                 if sys.platform == "win32" and process.pid:
-                    subprocess.run(
-                        ["taskkill", "/pid", str(process.pid), "/T", "/F"],
-                        capture_output=True,
-                        timeout=10,
-                    )
+                    try:
+                        taskkill = subprocess.run(
+                            ["taskkill", "/pid", str(process.pid), "/T", "/F"],
+                            capture_output=True,
+                            timeout=2,
+                        )
+                    except (OSError, subprocess.TimeoutExpired):
+                        taskkill = None
+                    # ``taskkill`` can be denied by a restricted token even
+                    # for a child we own. The Popen handle remains authoritative
+                    # and lets us terminate that process without waiting for its
+                    # natural timeout.
+                    if taskkill is None or taskkill.returncode != 0:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
                 else:
                     process.terminate()
                     try:

@@ -6,7 +6,9 @@ import base64
 import math
 import os
 import re
+import threading
 import time
+import weakref
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,112 @@ API_ERROR_MESSAGES = {
     429: "API 请求过于频繁或已达到速率限制，请稍后重试。",
 }
 SummaryProgressCb = Callable[[str, float], None]
+
+_CLOSE_LOCK = threading.Lock()
+_CLOSED_CLIENT_REFS: dict[int, weakref.ReferenceType[object]] = {}
+
+
+def _take_client_close(client: object | None) -> Callable[[], object] | None:
+    """Reserve one client's close call without invoking potentially blocking I/O."""
+    if client is None:
+        return None
+    client_id = id(client)
+    with _CLOSE_LOCK:
+        existing = _CLOSED_CLIENT_REFS.get(client_id)
+        if existing is not None and existing() is client:
+            return None
+        try:
+
+            def discard(reference: weakref.ReferenceType[object]) -> None:
+                with _CLOSE_LOCK:
+                    if _CLOSED_CLIENT_REFS.get(client_id) is reference:
+                        _CLOSED_CLIENT_REFS.pop(client_id, None)
+
+            _CLOSED_CLIENT_REFS[client_id] = weakref.ref(client, discard)
+        except TypeError:
+            # OpenAI/httpx clients are weak-referenceable. Keep unusual test or
+            # third-party client objects best-effort without masking cancel.
+            pass
+    close = getattr(client, "close", None)
+    return close if callable(close) else None
+
+
+def _invoke_client_close(close: Callable[[], object]) -> None:
+    try:
+        close()
+    except Exception:
+        # Closing is best-effort and must never mask cancellation or completion.
+        pass
+
+
+def _close_client_once(client: object | None) -> None:
+    """Close a shared SDK/httpx client at most once, even across workers."""
+    close = _take_client_close(client)
+    if close is not None:
+        _invoke_client_close(close)
+
+
+def _close_clients_async(clients: tuple[object | None, ...]) -> None:
+    """Request transport shutdown without making cancellation wait on close()."""
+    closes = [close for client in clients if (close := _take_client_close(client))]
+    if not closes:
+        return
+
+    def close_all() -> None:
+        for close in closes:
+            _invoke_client_close(close)
+
+    threading.Thread(
+        target=close_all,
+        name="llm-client-close",
+        daemon=True,
+    ).start()
+
+
+def _call_with_cancellation(
+    call: Callable[[], object],
+    *,
+    cancel_event: CancellationSignal | None,
+    clients: tuple[object | None, ...] = (),
+):
+    """Run a blocking SDK call while polling for cancellation.
+
+    A daemon worker prevents a stuck socket from blocking the caller. On
+    cancellation, closing the shared clients interrupts normal HTTP transports
+    where possible; the worker is deliberately not joined indefinitely.
+    """
+    if cancel_event is None:
+        return call()
+
+    result: dict[str, object] = {}
+    finished = threading.Event()
+
+    def worker() -> None:
+        try:
+            result["value"] = call()
+        except BaseException as error:  # propagate the original exception
+            result["error"] = error
+        finally:
+            finished.set()
+
+    thread = threading.Thread(target=worker, daemon=True)
+    thread.start()
+    while not finished.wait(0.05):
+        try:
+            check_cancelled(cancel_event)
+        except CancellationRequested:
+            _close_clients_async(clients)
+            raise
+    # The call may have completed just as the signal was set.
+    try:
+        check_cancelled(cancel_event)
+    except CancellationRequested:
+        _close_clients_async(clients)
+        raise
+    error = result.get("error")
+    if isinstance(error, BaseException):
+        raise error
+    return result.get("value")
 
 # Tokens that look like credentials must never reach a log, a note, or an
 # exception message. Gateways frequently echo the Authorization header back in
@@ -451,13 +559,17 @@ def _anthropic_chat_completion(
     for attempt in range(1, MAX_API_ATTEMPTS + 1):
         check_cancelled(cancel_event)
         try:
-            return _anthropic_completion(
-                http_client,
-                config,
-                model=kwargs["model"],
-                messages=kwargs.get("messages", []),
-                temperature=kwargs.get("temperature", 0.2),
-                max_tokens=kwargs.get("max_tokens", 4_000),
+            return _call_with_cancellation(
+                lambda: _anthropic_completion(
+                    http_client,
+                    config,
+                    model=kwargs["model"],
+                    messages=kwargs.get("messages", []),
+                    temperature=kwargs.get("temperature", 0.2),
+                    max_tokens=kwargs.get("max_tokens", 4_000),
+                ),
+                cancel_event=cancel_event,
+                clients=(http_client,),
             )
         except httpx.RequestError:
             if attempt == MAX_API_ATTEMPTS:
@@ -504,8 +616,16 @@ def _chat_completion(
         check_cancelled(cancel_event)
         try:
             if _uses_responses_api():
-                return _responses_completion(client, **kwargs)
-            return client.chat.completions.create(**kwargs)
+                def call():
+                    return _responses_completion(client, **kwargs)
+            else:
+                def call():
+                    return client.chat.completions.create(**kwargs)
+            return _call_with_cancellation(
+                call,
+                cancel_event=cancel_event,
+                clients=(client, http_client),
+            )
         except APIConnectionError as error:
             if attempt == MAX_API_ATTEMPTS:
                 raise RuntimeError(
@@ -553,6 +673,23 @@ def _chapter_callout(note: str) -> str:
     if not quoted_body:
         return f"> [!note]- {title}"
     return f"> [!note]- {title}\n>\n{quoted_body}"
+
+
+def _missing_chapter_note(index: int, total: int, chunk: str) -> str:
+    """Return a visible placeholder when one chapter request fails."""
+    start, end = _timestamp_bounds(chunk)
+    excerpt = chunk.strip()
+    if len(excerpt) > 1_000:
+        excerpt = excerpt[:1_000].rstrip() + "…"
+    quoted_excerpt = "\n".join(f"> {line}" if line else ">" for line in excerpt.splitlines())
+    return (
+        f"### {start}-{end}（第 {index}/{total} 段未能整理）\n\n"
+        "> [!warning] 章节整理失败\n"
+        "> 该时间段的详细章节笔记未生成；请重新生成报告以重试。\n"
+        ">\n"
+        "> **未整理的原始转写片段**\n"
+        f"{quoted_excerpt}"
+    )
 
 
 def _generate_chapter_notes(
@@ -629,30 +766,35 @@ def _generate_chapter_notes(
             f"并行整理 {len(chunks)} 个详细章节（模型 {notes_model}）",
             0.0,
         )
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = [
-            executor.submit(generate_one, index, chunk)
+    executor = ThreadPoolExecutor(max_workers=workers)
+    future_indexes = {}
+    try:
+        future_indexes = {
+            executor.submit(generate_one, index, chunk): index
             for index, chunk in enumerate(chunks, start=1)
-        ]
+        }
         completed = 0
         failures = 0
-        first_error: Exception | None = None
-        for future in as_completed(futures):
+        for future in as_completed(future_indexes):
             check_cancelled(cancel_event)
             try:
                 note_index, note = future.result()
             except CancellationRequested:
                 raise
-            except Exception as error:
+            except Exception:
                 # One bad chunk must not discard the chapters that did succeed;
                 # the gap is recorded in the note instead of failing the run.
                 failures += 1
-                if first_error is None:
-                    first_error = error
+                failed_index = future_indexes[future]
+                notes[failed_index - 1] = _missing_chapter_note(
+                    failed_index,
+                    len(chunks),
+                    chunks[failed_index - 1],
+                )
                 completed += 1
                 if on_progress:
                     on_progress(
-                        f"第 {completed}/{len(chunks)} 段整理失败，将跳过该段",
+                        f"第 {completed}/{len(chunks)} 段整理失败，将标记该段缺失",
                         min(
                             CHAPTER_PHASE_CEILING,
                             completed / (len(chunks) + 1),
@@ -666,15 +808,25 @@ def _generate_chapter_notes(
                     f"详细章节已完成 {completed}/{len(chunks)}",
                     min(CHAPTER_PHASE_CEILING, completed / (len(chunks) + 1)),
                 )
-    if failures and failures == len(chunks):
-        raise RuntimeError(
-            f"全部 {len(chunks)} 个章节均整理失败：{first_error}"
-        ) from first_error
-    if failures and on_progress:
-        on_progress(
-            f"注意：{failures}/{len(chunks)} 段未能整理，报告将缺少这些内容",
-            CHAPTER_PHASE_CEILING,
-        )
+        if failures and on_progress:
+            if failures == len(chunks):
+                message = (
+                    f"注意：全部 {len(chunks)} 段均未能整理，"
+                    "报告将保留缺失标记和原始转写片段"
+                )
+            else:
+                message = (
+                    f"注意：{failures}/{len(chunks)} 段未能整理，"
+                    "报告将标出缺失章节"
+                )
+            on_progress(message, CHAPTER_PHASE_CEILING)
+    except BaseException:
+        for future in future_indexes:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    else:
+        executor.shutdown(wait=True)
     return [note for note in notes if note]
 
 
@@ -878,5 +1030,5 @@ def summarize(
         )
         return SummarizeResult(body=body, note_title=note_title, topic=topic)
     finally:
-        if http_client:
-            http_client.close()
+        _close_client_once(client)
+        _close_client_once(http_client)
