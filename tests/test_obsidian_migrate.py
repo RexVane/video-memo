@@ -98,7 +98,7 @@ class MigrationMarkerTests(unittest.TestCase):
 
 class MigrationPlanTests(unittest.TestCase):
     def _build_legacy_vault(self, root: Path) -> Path:
-        vault = root / "vault"
+        vault = (root / "vault").resolve()
         legacy = vault / "Video Memos"
         frames = legacy / "assets" / "1a2b3c4d"
         frames.mkdir(parents=True)
@@ -146,7 +146,7 @@ class MigrationPlanTests(unittest.TestCase):
 
     def test_title_collision_gets_source_id_suffix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             vault = root / "vault"
             legacy = vault / "Video Memos"
             legacy.mkdir(parents=True)
@@ -162,7 +162,7 @@ class MigrationPlanTests(unittest.TestCase):
 
     def test_unidentifiable_notes_are_skipped(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            vault = Path(tmp) / "vault"
+            vault = (Path(tmp) / "vault").resolve()
             legacy = vault / "Video Memos"
             legacy.mkdir(parents=True)
             (legacy / "plain note.md").write_text("no id anywhere", encoding="utf-8")

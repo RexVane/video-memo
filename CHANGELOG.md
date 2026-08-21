@@ -4,7 +4,16 @@
 
 ## [Unreleased]
 
-- 后续修复和发布准备工作将在此记录。
+后续修复和发布准备工作将在此记录。
+
+## [0.2.1] - 2026-08-21
+
+- 新增完整的英文与简体中文双语 README，并保持安装、使用与安全说明同步。
+- 修复插件设置页在全屏窗口下的布局与滚动显示问题。
+- 从本版本起，当前项目源码正式统一采用 MIT 许可证；`v0.2.0` 及更早版本仍遵循各自发布时随附的许可证。
+- 对 Obsidian 插件的 cc-switch 只读集成和供应商设置界面进行 clean-room 重写，移除此前标注为 AGPL/CLI-Manager 派生的实现与样式。
+- 补齐插件所捆绑 `smol-toml` 的 BSD-3-Clause 完整许可证文本，并同步项目、Python 包和插件元数据。
+- 修复 Windows 8.3 短路径别名导致的迁移工具路径计算错误和 CI 路径断言失败。
 
 ## [0.2.0] - 2026-08-21
 
@@ -27,6 +36,7 @@
 - 增加普通 HTTP 直链的校验型 Range 多连接下载，并在不适用时回退到 yt-dlp。
 - 统一项目品牌为 VideoMemo / video-memo。
 
-[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/RexVane/video-memo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/RexVane/video-memo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/RexVane/video-memo/releases/tag/v0.1.0

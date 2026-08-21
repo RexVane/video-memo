@@ -17,7 +17,7 @@ Install the built plugin files into a Vault:
 .\install.ps1 -VaultPath "D:\Notes\My Vault"
 ```
 
-Enable the plugin, then set the VideoMemo project directory in Obsidian settings. Python is detected automatically from the project `.venv`, with PATH `python` as fallback. The installer copies `main.js`, `manifest.json`, `styles.css`, `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; build dependencies remain in the project directory.
+Enable the plugin, then set the VideoMemo project directory in Obsidian settings. Python is detected automatically from the project `.venv`, with PATH `python` as fallback. The installer copies the built runtime files (`main.js`, `manifest.json`, and `styles.css`) together with `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; source and build dependencies remain in the project directory.
 
 Commands:
 
@@ -37,4 +37,4 @@ Each custom provider's API key is stored in plaintext in the current Vault's `.o
 
 The cc-switch database view requires an Obsidian/Electron runtime with `node:sqlite`. On older desktop runtimes, the plugin still loads and can use the custom provider source.
 
-The cc-switch provider workflow and layout are adapted from [CLI-Manager](https://github.com/dark-hxx/CLI-Manager), Copyright (c) 2026 Chenyme, under AGPL-3.0-or-later. See `NOTICE`, `COPYRIGHT.md`, and `LICENSE`. The corresponding source for a released bundle is published in the `obsidian-plugin/` directory of [RexVane/video-memo](https://github.com/RexVane/video-memo).
+The plugin source and bundled object code are released under the [MIT License](LICENSE). Third-party dependencies retain their respective licenses; see `NOTICE`, `COPYRIGHT.md`, and the repository's `THIRD-PARTY-NOTICES.md`.

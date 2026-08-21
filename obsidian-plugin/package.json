@@ -1,13 +1,13 @@
 {
   "name": "obsidian-video-memo",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Obsidian desktop plugin for the VideoMemo Python engine",
   "main": "main.js",
   "engines": {
     "node": ">=18"
   },
-  "license": "AGPL-3.0-or-later",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/RexVane/video-memo.git",

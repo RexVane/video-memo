@@ -41,14 +41,17 @@ export class VideoMemoSettingTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this;
-    containerEl.addClass("video-memo-settings-tab");
     containerEl.empty();
+    containerEl.removeClass("video-memo-settings-tab");
+    containerEl.addClass("video-memo-settings-host");
+    containerEl.addClass("video-memo-settings-active");
+    const settingsEl = containerEl.createDiv({ cls: "video-memo-settings-tab" });
     if (this.page === "providers") {
-      this.providerView.render(containerEl);
+      this.providerView.render(settingsEl);
       return;
     }
 
-    const intro = containerEl.createDiv({ cls: "video-memo-settings-intro" });
+    const intro = settingsEl.createDiv({ cls: "video-memo-settings-intro" });
     const introMark = intro.createDiv({ cls: "video-memo-settings-mark" });
     setIcon(introMark, "video");
     const introCopy = intro.createDiv({ cls: "video-memo-settings-intro-copy" });
@@ -59,7 +62,7 @@ export class VideoMemoSettingTab extends PluginSettingTab {
       this.providerView.showProviderList();
       this.display();
     };
-    const providerSetting = new Setting(containerEl)
+    const providerSetting = new Setting(settingsEl)
       .setName("供应商")
       .setDesc(describeProviderSelection(this.plugin.settings))
       .addExtraButton((button) =>
@@ -77,11 +80,11 @@ export class VideoMemoSettingTab extends PluginSettingTab {
       event.preventDefault();
       openProviders();
     });
-    containerEl.createDiv({
+    settingsEl.createDiv({
       cls: "video-memo-settings-section-label",
       text: "运行环境",
     });
-    new Setting(containerEl)
+    new Setting(settingsEl)
       .setName("项目目录")
       .setDesc("包含 src/pipeline.py 的 VideoMemo 目录")
       .addText((text) =>
@@ -96,7 +99,7 @@ export class VideoMemoSettingTab extends PluginSettingTab {
       );
     const projectPath = this.plugin.settings.projectPath.trim();
     const pythonPath = projectPath ? this.plugin.resolvePython(projectPath) : "";
-    new Setting(containerEl)
+    new Setting(settingsEl)
       .setName("Python 路径")
       .setDesc("自动检测项目 .venv，未找到时使用系统 PATH 中的 python")
       .addText((text) => {
@@ -105,11 +108,11 @@ export class VideoMemoSettingTab extends PluginSettingTab {
           .setValue(pythonPath)
           .inputEl.disabled = true;
       });
-    containerEl.createDiv({
+    settingsEl.createDiv({
       cls: "video-memo-settings-section-label",
       text: "输出",
     });
-    new Setting(containerEl)
+    new Setting(settingsEl)
       .setName("Vault 目标文件夹（可选）")
       .setDesc("留空：按视频内容自动创建主题文件夹（如 Git/）；填写：固定放到 Vault 内该相对路径（不允许绝对路径或 .. 片段）")
       .addText((text) =>
@@ -121,7 +124,7 @@ export class VideoMemoSettingTab extends PluginSettingTab {
             await this.persist();
           }),
       );
-    new Setting(containerEl)
+    new Setting(settingsEl)
       .setName("完成后清理媒体")
       .setDesc("删除输出目录中的下载媒体和音轨，不删除本地输入文件")
       .addToggle((toggle) =>

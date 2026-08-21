@@ -23,7 +23,7 @@ def _linked_frame(note: Path, vault: Path, name: str = "frame_001.jpg") -> Path:
     for link in content.split("![[")[1:]:
         relative = link.split("]]", 1)[0]
         if relative.endswith(f"/{name}"):
-            return vault.joinpath(*relative.split("/"))
+            return vault.resolve().joinpath(*relative.split("/"))
     raise AssertionError(f"笔记中没有找到附件链接: {name}")
 
 
@@ -156,7 +156,7 @@ class ObsidianExportTests(unittest.TestCase):
                 topic="Git",
             )
 
-            self.assertEqual(note.parent, vault / "Git")
+            self.assertEqual(note.parent, (vault / "Git").resolve())
             self.assertEqual(note.name, "Git 版本控制核心概念.md")
             content = note.read_text(encoding="utf-8")
             self.assertIn("![[Git/assets/", content)

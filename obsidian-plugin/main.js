@@ -2,6 +2,14 @@ var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __esm = (fn, res, err) => function __init() {
+  if (err) throw err[0];
+  try {
+    return fn && (res = (0, fn[__getOwnPropNames(fn)[0]])(fn = 0)), res;
+  } catch (e) {
+    throw err = [e], e;
+  }
+};
 var __export = (target, all) => {
   for (var name in all)
     __defProp(target, name, { get: all[name], enumerable: true });
@@ -16,115 +24,102 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// src/main.ts
-var main_exports = {};
-__export(main_exports, {
-  default: () => VideoMemoPlugin
-});
-module.exports = __toCommonJS(main_exports);
-var import_node_child_process = require("node:child_process");
-var import_node_fs2 = require("node:fs");
-var import_node_readline = require("node:readline");
-var import_node_path2 = require("node:path");
-var import_obsidian6 = require("obsidian");
-
-// src/ccswitch.ts
-var import_node_fs = require("node:fs");
-var import_node_os = require("node:os");
-var import_node_path = require("node:path");
-var import_obsidian = require("obsidian");
-
 // node_modules/smol-toml/dist/date.js
-var DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
-var TomlDate = class _TomlDate extends Date {
-  #hasDate = false;
-  #hasTime = false;
-  #offset = null;
-  constructor(date) {
-    let hasDate = true;
-    let hasTime = true;
-    let offset = "Z";
-    if (typeof date === "string") {
-      let match = date.match(DATE_TIME_RE);
-      if (match) {
-        if (!match[1]) {
-          hasDate = false;
-          date = `0000-01-01T${date}`;
+var DATE_TIME_RE, TomlDate;
+var init_date = __esm({
+  "node_modules/smol-toml/dist/date.js"() {
+    DATE_TIME_RE = /^(\d{4}-\d{2}-\d{2})?[T ]?(?:(\d{2}):\d{2}(?::\d{2}(?:\.\d+)?)?)?(Z|[-+]\d{2}:\d{2})?$/i;
+    TomlDate = class _TomlDate extends Date {
+      #hasDate = false;
+      #hasTime = false;
+      #offset = null;
+      constructor(date) {
+        let hasDate = true;
+        let hasTime = true;
+        let offset = "Z";
+        if (typeof date === "string") {
+          let match = date.match(DATE_TIME_RE);
+          if (match) {
+            if (!match[1]) {
+              hasDate = false;
+              date = `0000-01-01T${date}`;
+            }
+            hasTime = !!match[2];
+            hasTime && date[10] === " " && (date = date.replace(" ", "T"));
+            if (match[2] && +match[2] > 23) {
+              date = "";
+            } else {
+              offset = match[3] || null;
+              date = date.toUpperCase();
+              if (!offset && hasTime)
+                date += "Z";
+            }
+          } else {
+            date = "";
+          }
         }
-        hasTime = !!match[2];
-        hasTime && date[10] === " " && (date = date.replace(" ", "T"));
-        if (match[2] && +match[2] > 23) {
-          date = "";
-        } else {
-          offset = match[3] || null;
-          date = date.toUpperCase();
-          if (!offset && hasTime)
-            date += "Z";
+        super(date);
+        if (!isNaN(this.getTime())) {
+          this.#hasDate = hasDate;
+          this.#hasTime = hasTime;
+          this.#offset = offset;
         }
-      } else {
-        date = "";
       }
-    }
-    super(date);
-    if (!isNaN(this.getTime())) {
-      this.#hasDate = hasDate;
-      this.#hasTime = hasTime;
-      this.#offset = offset;
-    }
+      isDateTime() {
+        return this.#hasDate && this.#hasTime;
+      }
+      isLocal() {
+        return !this.#hasDate || !this.#hasTime || !this.#offset;
+      }
+      isDate() {
+        return this.#hasDate && !this.#hasTime;
+      }
+      isTime() {
+        return this.#hasTime && !this.#hasDate;
+      }
+      isValid() {
+        return this.#hasDate || this.#hasTime;
+      }
+      toISOString() {
+        let iso = super.toISOString();
+        if (this.isDate())
+          return iso.slice(0, 10);
+        if (this.isTime())
+          return iso.slice(11, 23);
+        if (this.#offset === null)
+          return iso.slice(0, -1);
+        if (this.#offset === "Z")
+          return iso;
+        let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
+        offset = this.#offset[0] === "-" ? offset : -offset;
+        let offsetDate = new Date(this.getTime() - offset * 6e4);
+        return offsetDate.toISOString().slice(0, -1) + this.#offset;
+      }
+      static wrapAsOffsetDateTime(jsDate, offset = "Z") {
+        let date = new _TomlDate(jsDate);
+        date.#offset = offset;
+        return date;
+      }
+      static wrapAsLocalDateTime(jsDate) {
+        let date = new _TomlDate(jsDate);
+        date.#offset = null;
+        return date;
+      }
+      static wrapAsLocalDate(jsDate) {
+        let date = new _TomlDate(jsDate);
+        date.#hasTime = false;
+        date.#offset = null;
+        return date;
+      }
+      static wrapAsLocalTime(jsDate) {
+        let date = new _TomlDate(jsDate);
+        date.#hasDate = false;
+        date.#offset = null;
+        return date;
+      }
+    };
   }
-  isDateTime() {
-    return this.#hasDate && this.#hasTime;
-  }
-  isLocal() {
-    return !this.#hasDate || !this.#hasTime || !this.#offset;
-  }
-  isDate() {
-    return this.#hasDate && !this.#hasTime;
-  }
-  isTime() {
-    return this.#hasTime && !this.#hasDate;
-  }
-  isValid() {
-    return this.#hasDate || this.#hasTime;
-  }
-  toISOString() {
-    let iso = super.toISOString();
-    if (this.isDate())
-      return iso.slice(0, 10);
-    if (this.isTime())
-      return iso.slice(11, 23);
-    if (this.#offset === null)
-      return iso.slice(0, -1);
-    if (this.#offset === "Z")
-      return iso;
-    let offset = +this.#offset.slice(1, 3) * 60 + +this.#offset.slice(4, 6);
-    offset = this.#offset[0] === "-" ? offset : -offset;
-    let offsetDate = new Date(this.getTime() - offset * 6e4);
-    return offsetDate.toISOString().slice(0, -1) + this.#offset;
-  }
-  static wrapAsOffsetDateTime(jsDate, offset = "Z") {
-    let date = new _TomlDate(jsDate);
-    date.#offset = offset;
-    return date;
-  }
-  static wrapAsLocalDateTime(jsDate) {
-    let date = new _TomlDate(jsDate);
-    date.#offset = null;
-    return date;
-  }
-  static wrapAsLocalDate(jsDate) {
-    let date = new _TomlDate(jsDate);
-    date.#hasTime = false;
-    date.#offset = null;
-    return date;
-  }
-  static wrapAsLocalTime(jsDate) {
-    let date = new _TomlDate(jsDate);
-    date.#hasDate = false;
-    date.#offset = null;
-    return date;
-  }
-};
+});
 
 // node_modules/smol-toml/dist/error.js
 function getLineColFromPtr(string, ptr) {
@@ -150,21 +145,26 @@ function makeCodeBlock(string, line, column) {
   }
   return codeblock;
 }
-var TomlError = class extends Error {
-  line;
-  column;
-  codeblock;
-  constructor(message, options) {
-    const [line, column] = getLineColFromPtr(options.toml, options.ptr);
-    const codeblock = makeCodeBlock(options.toml, line, column);
-    super(`Invalid TOML document: ${message}
+var TomlError;
+var init_error = __esm({
+  "node_modules/smol-toml/dist/error.js"() {
+    TomlError = class extends Error {
+      line;
+      column;
+      codeblock;
+      constructor(message, options) {
+        const [line, column] = getLineColFromPtr(options.toml, options.ptr);
+        const codeblock = makeCodeBlock(options.toml, line, column);
+        super(`Invalid TOML document: ${message}
 
 ${codeblock}`, options);
-    this.line = line;
-    this.column = column;
-    this.codeblock = codeblock;
+        this.line = line;
+        this.column = column;
+        this.codeblock = codeblock;
+      }
+    };
   }
-};
+});
 
 // node_modules/smol-toml/dist/util.js
 function indexOfNewline(str, start = 0) {
@@ -220,11 +220,13 @@ function skipUntil(ctx, sep, end) {
     ptr
   });
 }
+var init_util = __esm({
+  "node_modules/smol-toml/dist/util.js"() {
+    init_error();
+  }
+});
 
 // node_modules/smol-toml/dist/primitive.js
-var INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
-var FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
-var LEADING_ZERO = /^[+-]?0[0-9_]/;
 function parseString(ctx) {
   let start = ctx.p;
   let c = ctx.s.charCodeAt(ctx.p++);
@@ -376,6 +378,17 @@ function parseValue(ctx, integersAsBigInt, end) {
     throw new TomlError("invalid value", err);
   return date;
 }
+var INT_REGEX, FLOAT_REGEX, LEADING_ZERO;
+var init_primitive = __esm({
+  "node_modules/smol-toml/dist/primitive.js"() {
+    init_date();
+    init_error();
+    init_util();
+    INT_REGEX = /^((0x[0-9a-fA-F](_?[0-9a-fA-F])*)|(([+-]|0[ob])?\d(_?\d)*))$/;
+    FLOAT_REGEX = /^[+-]?\d(_?\d)*(\.\d(_?\d)*)?([eE][+-]?\d(_?\d)*)?$/;
+    LEADING_ZERO = /^[+-]?0[0-9_]/;
+  }
+});
 
 // node_modules/smol-toml/dist/extract.js
 function extractValue(ctx, end, integersAsBigInt) {
@@ -409,9 +422,15 @@ function extractValue(ctx, end, integersAsBigInt) {
   }
   return parseValue(ctx, integersAsBigInt, end);
 }
+var init_extract = __esm({
+  "node_modules/smol-toml/dist/extract.js"() {
+    init_primitive();
+    init_struct();
+    init_error();
+  }
+});
 
 // node_modules/smol-toml/dist/struct.js
-var KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
 function parseKey(ctx, end = "=") {
   let start = ctx.p;
   let dot = start - 1;
@@ -551,6 +570,16 @@ function parseArray(ctx, integersAsBigInt) {
     ptr: ctx.p
   });
 }
+var KEY_PART_RE;
+var init_struct = __esm({
+  "node_modules/smol-toml/dist/struct.js"() {
+    init_primitive();
+    init_extract();
+    init_util();
+    init_error();
+    KEY_PART_RE = /^[a-zA-Z0-9-_]+[ \t]*$/;
+  }
+});
 
 // node_modules/smol-toml/dist/parse.js
 function peekTable(key, table, meta, type) {
@@ -678,209 +707,249 @@ function parse(toml, { maxDepth = 1e3, integersAsBigInt } = {}) {
   }
   return res;
 }
+var init_parse = __esm({
+  "node_modules/smol-toml/dist/parse.js"() {
+    init_struct();
+    init_extract();
+    init_util();
+    init_error();
+  }
+});
+
+// node_modules/smol-toml/dist/stringify.js
+var init_stringify = __esm({
+  "node_modules/smol-toml/dist/stringify.js"() {
+  }
+});
+
+// node_modules/smol-toml/dist/index.js
+var init_dist = __esm({
+  "node_modules/smol-toml/dist/index.js"() {
+    init_parse();
+    init_stringify();
+    init_date();
+    init_error();
+  }
+});
 
 // src/ccswitch.ts
-var SECRET_MARKERS = ["token", "key", "secret", "auth", "password"];
-var SECRET_ASSIGNMENT = /((?:"?[\w.-]*(?:token|key|secret|auth|password)[\w.-]*"?\s*[:=]\s*))(?:(?:"(?:\\.|[^"])*")|(?:'(?:\\.|[^'])*')|(?:[^,\s}\r\n#]+))/gi;
-var BEARER_SECRET = /(bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
-var BASE_URL_KEYS = [
-  "OPENAI_BASE_URL",
-  "OPENAI_API_BASE",
-  "CODEX_BASE_URL",
-  "BASE_URL",
-  "API_BASE",
-  "ENDPOINT",
-  "URL"
-];
-var SECRET_KEYS = [
-  "OPENAI_API_KEY",
-  "OPENAI_AUTH_TOKEN",
-  "CODEX_API_KEY",
-  "CODEX_AUTH_TOKEN",
-  "API_KEY",
-  "AUTH_TOKEN"
-];
-function normalizeApiFormat(value) {
-  if (typeof value !== "string") return "chat_completions";
-  const normalized = value.trim().toLowerCase().replace("-", "_");
-  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
-    return "anthropic_messages";
-  }
-  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
-    return "responses";
-  }
-  return "chat_completions";
-}
+var ccswitch_exports = {};
+__export(ccswitch_exports, {
+  defaultCcSwitchDbPath: () => defaultCcSwitchDbPath,
+  fetchCcSwitchProviderModels: () => fetchCcSwitchProviderModels,
+  fetchOpenAiCompatibleModels: () => fetchOpenAiCompatibleModels,
+  loadCcSwitchProviders: () => loadCcSwitchProviders,
+  normalizeApiFormat: () => normalizeApiFormat,
+  normalizeOpenAiBaseUrl: () => normalizeOpenAiBaseUrl,
+  openAiModelsUrl: () => openAiModelsUrl,
+  probeOpenAiCompatibleModel: () => probeOpenAiCompatibleModel,
+  resolveCcSwitchDbPath: () => resolveCcSwitchDbPath,
+  resolveCcSwitchProviderRuntime: () => resolveCcSwitchProviderRuntime
+});
 function asRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
 }
 function textValue(value) {
-  if (typeof value === "string") return value.trim() || null;
-  if (typeof value === "number" || typeof value === "boolean") {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "bigint") {
     return String(value);
+  }
+  return "";
+}
+function numberValue(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") {
+    const converted = Number(value);
+    return Number.isSafeInteger(converted) ? converted : null;
   }
   return null;
 }
 function normalizeKey(value) {
-  return value.trim().replaceAll("-", "_").toUpperCase();
+  return value.replaceAll("-", "").replaceAll("_", "").toLowerCase();
 }
-function findTextByKeyMatcher(value, matcher) {
-  const record = asRecord(value);
-  if (!record) return null;
-  for (const [key, candidate] of Object.entries(record)) {
-    if (matcher(key)) {
-      const text = textValue(candidate);
-      if (text) return text;
+function keyMatches(normalizedKey, acceptedKeys) {
+  if (acceptedKeys.has(normalizedKey)) return true;
+  if (acceptedKeys.has("baseurl") && normalizedKey.endsWith("baseurl")) {
+    return true;
+  }
+  return acceptedKeys.has("model") && normalizedKey.endsWith("model");
+}
+function findTextByKey(root, acceptedKeys) {
+  const record = asRecord(root);
+  if (!record) return "";
+  for (const [key, value] of Object.entries(record)) {
+    if (keyMatches(normalizeKey(key), acceptedKeys)) {
+      const candidate = textValue(value);
+      if (candidate) return candidate;
     }
   }
-  for (const candidate of Object.values(record)) {
-    const nested = findTextByKeyMatcher(candidate, matcher);
+  for (const value of Object.values(record)) {
+    const nested = findTextByKey(value, acceptedKeys);
     if (nested) return nested;
   }
-  return null;
+  return "";
 }
-function findTextByKeyPatterns(value, exact, suffixes) {
-  const normalizedExact = exact.map(normalizeKey);
-  const exactMatch = findTextByKeyMatcher(
-    value,
-    (key) => normalizedExact.includes(normalizeKey(key))
-  );
-  if (exactMatch) return exactMatch;
-  const normalizedSuffixes = suffixes.map(normalizeKey);
-  return findTextByKeyMatcher(
-    value,
-    (key) => normalizedSuffixes.some((suffix) => normalizeKey(key).endsWith(suffix))
-  );
+function isSecretValueKey(key) {
+  const normalized = normalizeKey(key);
+  if (normalized.endsWith("envkey")) return false;
+  return [
+    "apikey",
+    "authtoken",
+    "accesstoken",
+    "bearertoken",
+    "password",
+    "secret",
+    "token"
+  ].some((suffix) => normalized.endsWith(suffix));
 }
-function isSecretKey(key) {
-  const lower = key.toLowerCase();
-  return SECRET_MARKERS.some((marker) => lower.includes(marker));
-}
-function maskSecret(value) {
-  const characters = [...value];
-  if (characters.length <= 12) return "***";
-  return `${characters.slice(0, 4).join("")}...${characters.slice(-4).join("")}`;
-}
-function redactEmbeddedSecrets(value) {
-  return value.replace(SECRET_ASSIGNMENT, '$1"***"').replace(BEARER_SECRET, "$1***");
-}
-function collectMaskedEnv(config) {
-  const result = {};
-  for (const sectionName of ["env", "auth"]) {
-    const section = asRecord(config[sectionName]);
-    if (!section) continue;
-    for (const [key, value] of Object.entries(section)) {
-      const text = textValue(value) ?? JSON.stringify(value);
-      result[key] = isSecretKey(key) ? maskSecret(text) : text;
+function findSecretValue(root) {
+  const record = asRecord(root);
+  if (!record) return "";
+  for (const [key, value] of Object.entries(record)) {
+    if (isSecretValueKey(key)) {
+      const candidate = textValue(value);
+      if (candidate) return candidate;
     }
   }
-  return result;
+  for (const value of Object.values(record)) {
+    const nested = findSecretValue(value);
+    if (nested) return nested;
+  }
+  return "";
 }
-function redactSecrets(value, parentKey = "") {
-  if (isSecretKey(parentKey)) {
-    const text = textValue(value);
-    return text ? maskSecret(text) : "***";
+function findEnvironmentSecret(root) {
+  const record = asRecord(root);
+  if (!record) return "";
+  for (const [key, value] of Object.entries(record)) {
+    if (normalizeKey(key).endsWith("envkey")) {
+      const environmentName = textValue(value);
+      if (environmentName) {
+        const secret = process.env[environmentName]?.trim();
+        if (secret) return secret;
+      }
+    }
   }
-  if (Array.isArray(value)) {
-    return value.map((item) => redactSecrets(item));
+  for (const value of Object.values(record)) {
+    const nested = findEnvironmentSecret(value);
+    if (nested) return nested;
   }
-  if (typeof value === "string") {
-    return redactEmbeddedSecrets(value);
-  }
-  const record = asRecord(value);
-  if (!record) return value;
-  return Object.fromEntries(
-    Object.entries(record).map(([key, item]) => [key, redactSecrets(item, key)])
-  );
+  return "";
 }
-function parseMeta(raw) {
+function parseJsonRecord(value) {
+  if (typeof value !== "string") return null;
   try {
-    return asRecord(JSON.parse(raw || "{}")) ?? {};
+    return asRecord(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+function parseTomlRecord(value) {
+  if (!value.trim()) return {};
+  try {
+    return asRecord(parse(value)) ?? {};
   } catch {
     return {};
   }
 }
-function parseTomlConfig(raw) {
-  if (!raw.trim()) return { baseUrl: null, model: null, apiFormat: null };
-  try {
-    const parsed = asRecord(parse(raw)) ?? {};
-    const selectedName = textValue(parsed.model_provider);
-    const providers = asRecord(parsed.model_providers);
-    let selectedProvider = selectedName && providers ? asRecord(providers[selectedName]) : null;
-    if (!selectedProvider && providers) {
-      selectedProvider = Object.values(providers).map(asRecord).find((provider) => textValue(provider?.base_url)) ?? null;
-    }
-    return {
-      baseUrl: textValue(selectedProvider?.base_url),
-      model: textValue(parsed.model),
-      apiFormat: textValue(selectedProvider?.wire_api)
-    };
-  } catch {
-    const model = raw.match(/^\s*model\s*=\s*["']([^"']+)["']/m)?.[1] ?? null;
-    const baseUrl = raw.match(/^\s*base_url\s*=\s*["']([^"']+)["']/m)?.[1] ?? null;
-    const apiFormat = raw.match(/^\s*wire_api\s*=\s*["']([^"']+)["']/m)?.[1] ?? null;
-    return { baseUrl, model, apiFormat };
-  }
+function selectedCodexProvider(toml) {
+  const providers = asRecord(toml.model_providers);
+  if (!providers) return null;
+  const selectedName = textValue(toml.model_provider);
+  const selected = selectedName ? asRecord(providers[selectedName]) : null;
+  if (selected) return selected;
+  return Object.values(providers).map(asRecord).find((provider) => findTextByKey(provider, BASE_URL_KEYS)) ?? null;
 }
-function parseProviderConfig(settingsConfig, metaRaw) {
-  try {
-    const parsed = asRecord(JSON.parse(settingsConfig));
-    if (!parsed) throw new Error("provider settings must be an object");
-    const env = asRecord(parsed.env);
-    const auth = asRecord(parsed.auth);
-    const toml = parseTomlConfig(textValue(parsed.config) ?? "");
-    const baseUrl = findTextByKeyPatterns(env, BASE_URL_KEYS, ["_BASE_URL", "_API_BASE", "_ENDPOINT"]) ?? findTextByKeyPatterns(
-      parsed,
-      ["openai_base_url", "chatgpt_base_url", "base_url", "api_base", "endpoint"],
-      ["_BASE_URL", "_API_BASE", "_ENDPOINT"]
-    ) ?? toml.baseUrl;
-    const model = findTextByKeyPatterns(env, ["OPENAI_MODEL", "CODEX_MODEL", "MODEL"], ["_MODEL"]) ?? textValue(parsed.model) ?? toml.model;
-    const apiKey = findTextByKeyPatterns(env, SECRET_KEYS, ["_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_TOKEN"]) ?? findTextByKeyPatterns(auth, SECRET_KEYS, ["_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_TOKEN"]) ?? findTextByKeyPatterns(parsed, SECRET_KEYS, ["_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_TOKEN"]);
-    const meta = parseMeta(metaRaw);
-    const apiFormat = textValue(meta.apiFormat) ?? toml.apiFormat;
-    return {
-      baseUrl,
-      model,
-      apiFormat,
-      apiKey,
-      maskedEnv: collectMaskedEnv(parsed),
-      redactedSettingsConfig: JSON.stringify(redactSecrets(parsed), null, 2),
-      parseError: false
-    };
-  } catch {
-    return {
-      baseUrl: null,
-      model: null,
-      apiFormat: null,
-      apiKey: null,
-      maskedEnv: {},
-      redactedSettingsConfig: "\u914D\u7F6E\u89E3\u6790\u5931\u8D25\u3002\u4E3A\u907F\u514D\u6CC4\u9732 API Key\uFF0C\u539F\u59CB\u914D\u7F6E\u5DF2\u9690\u85CF\u3002",
-      parseError: true
-    };
-  }
-}
-function providerFromRow(row) {
-  const parsed = parseProviderConfig(row.settings_config, row.meta);
-  const openAiCompatible = !parsed.apiFormat?.toLowerCase().includes("anthropic");
+function selectedGrokModel(toml) {
+  const models = asRecord(toml.models);
+  const modelName = textValue(models?.default);
+  const modelTable = asRecord(toml.model);
   return {
-    id: String(row.id),
-    appType: String(row.app_type),
-    name: String(row.name),
-    category: row.category ? String(row.category) : null,
-    websiteUrl: row.website_url ? String(row.website_url) : null,
-    notes: row.notes ? String(row.notes) : null,
-    sortIndex: row.sort_index === null ? null : Number(row.sort_index),
-    createdAt: row.created_at === null ? null : Number(row.created_at),
-    isCurrent: Boolean(Number(row.is_current)),
-    baseUrl: parsed.baseUrl,
-    model: parsed.model,
-    apiFormat: parsed.apiFormat,
-    maskedEnv: parsed.maskedEnv,
-    configParseError: parsed.parseError,
-    redactedSettingsConfig: parsed.redactedSettingsConfig,
-    providerType: row.provider_type ? String(row.provider_type) : null,
-    usable: Boolean(parsed.baseUrl && parsed.apiKey && openAiCompatible)
+    model: modelName,
+    config: modelName && modelTable ? asRecord(modelTable[modelName]) : null
   };
+}
+function collectMaskedEnvironment(settings) {
+  const result = {};
+  for (const sectionName of ["env", "auth"]) {
+    const section = asRecord(settings[sectionName]);
+    if (!section) continue;
+    for (const [key, rawValue] of Object.entries(section)) {
+      const value = textValue(rawValue);
+      if (!value) continue;
+      result[key] = isSecretValueKey(key) ? "******" : normalizeKey(key).endsWith("baseurl") ? sanitizeUrlForDisplay(value) : value;
+    }
+  }
+  return result;
+}
+function extractProviderConfig(settingsRaw, metadataRaw, appType) {
+  const settings = parseJsonRecord(settingsRaw);
+  const parsedSettings = settings ?? {};
+  const metadata = parseJsonRecord(metadataRaw) ?? {};
+  const toml = parseTomlRecord(textValue(parsedSettings.config));
+  const codexProvider = selectedCodexProvider(toml);
+  const grokModel = selectedGrokModel(toml);
+  const apiKeySources = [
+    parsedSettings,
+    codexProvider,
+    grokModel.config,
+    toml
+  ];
+  const directApiKey = apiKeySources.map(findSecretValue).find(Boolean) ?? "";
+  const environmentApiKey = apiKeySources.map(findEnvironmentSecret).find(Boolean) ?? "";
+  const apiKey = directApiKey || environmentApiKey;
+  const preferredConfigSources = [codexProvider, grokModel.config, parsedSettings];
+  const baseUrl = [...preferredConfigSources, toml].map((value) => findTextByKey(value, BASE_URL_KEYS)).find(Boolean) ?? "";
+  const model = textValue(toml.model) || grokModel.model || findTextByKey(parsedSettings, MODEL_KEYS) || findTextByKey(codexProvider, MODEL_KEYS);
+  const apiFormat = normalizeApiFormat(
+    findTextByKey(metadata, FORMAT_KEYS) || findTextByKey(codexProvider, FORMAT_KEYS) || findTextByKey(grokModel.config, FORMAT_KEYS) || findTextByKey(parsedSettings, FORMAT_KEYS) || (appType.toLowerCase().startsWith("claude") ? "anthropic_messages" : "chat_completions")
+  );
+  return {
+    apiKey,
+    baseUrl,
+    model,
+    apiFormat,
+    maskedEnv: collectMaskedEnvironment(parsedSettings),
+    parseError: Boolean(settingsRaw.trim() && !settings)
+  };
+}
+function safeConfigSummary(config) {
+  return JSON.stringify({
+    baseUrl: sanitizeUrlForDisplay(config.baseUrl) || null,
+    model: config.model || null,
+    apiFormat: config.apiFormat,
+    environment: config.maskedEnv,
+    apiKeyConfigured: Boolean(config.apiKey)
+  });
+}
+function sanitizeUrlForDisplay(value) {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return value ? "[configured URL]" : "";
+  }
+}
+function tryNormalizeBaseUrl(value) {
+  try {
+    return normalizeOpenAiBaseUrl(value);
+  } catch {
+    return "";
+  }
+}
+function normalizeApiFormat(value) {
+  if (typeof value !== "string") return "chat_completions";
+  const normalized = value.trim().toLowerCase().replaceAll("-", "_");
+  if (["anthropic", "anthropic_messages", "messages"].includes(normalized)) {
+    return "anthropic_messages";
+  }
+  if (["openai_responses", "response", "responses"].includes(normalized)) {
+    return "responses";
+  }
+  return "chat_completions";
 }
 function defaultCcSwitchDbPath() {
   return (0, import_node_path.join)((0, import_node_os.homedir)(), ".cc-switch", "cc-switch.db");
@@ -895,7 +964,7 @@ function loadNodeSqlite() {
     return require("node:sqlite");
   } catch {
     throw new Error(
-      "\u5F53\u524D Obsidian \u8FD0\u884C\u65F6\u4E0D\u652F\u6301 node:sqlite\u3002\u8BF7\u5347\u7EA7 Obsidian\uFF0C\u6216\u5207\u6362\u5230\u73AF\u5883\u914D\u7F6E\u3002"
+      "\u5F53\u524D Obsidian \u8FD0\u884C\u65F6\u4E0D\u652F\u6301 node:sqlite\uFF1B\u8BF7\u5207\u6362\u5230\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u6216\u5347\u7EA7 Obsidian"
     );
   }
 }
@@ -905,7 +974,7 @@ function openDatabase(configuredPath) {
     throw new Error("cc-switch \u6570\u636E\u5E93\u8DEF\u5F84\u5FC5\u987B\u6307\u5411 .db \u6587\u4EF6");
   }
   if (!(0, import_node_fs.existsSync)(path)) {
-    throw new Error(`\u672A\u627E\u5230 cc-switch \u6570\u636E\u5E93: ${path}`);
+    throw new Error("\u672A\u627E\u5230 cc-switch \u6570\u636E\u5E93");
   }
   const { DatabaseSync } = loadNodeSqlite();
   return {
@@ -913,16 +982,52 @@ function openDatabase(configuredPath) {
     path
   };
 }
-var PROVIDER_QUERY = `
-  SELECT id, app_type, name, settings_config, website_url, category, notes,
-         sort_index, created_at, is_current, meta, provider_type
-  FROM providers
-`;
 function loadCcSwitchProviders(configuredPath = "") {
   const { db, path } = openDatabase(configuredPath);
   try {
-    const rows = db.prepare(`${PROVIDER_QUERY} ORDER BY app_type, sort_index, name`).all();
-    return { dbPath: path, providers: rows.map(providerFromRow) };
+    const rows = db.prepare("SELECT * FROM providers").all();
+    const providers = rows.map((row) => {
+      const appType = textValue(row.app_type);
+      const config = extractProviderConfig(
+        textValue(row.settings_config),
+        textValue(row.meta),
+        appType
+      );
+      const baseUrl = tryNormalizeBaseUrl(config.baseUrl);
+      return {
+        id: textValue(row.id),
+        appType,
+        name: textValue(row.name) || textValue(row.id),
+        category: textValue(row.category) || null,
+        websiteUrl: sanitizeUrlForDisplay(textValue(row.website_url)) || null,
+        notes: textValue(row.notes) || null,
+        sortIndex: numberValue(row.sort_index),
+        createdAt: numberValue(row.created_at),
+        isCurrent: Number(row.is_current) === 1,
+        baseUrl: baseUrl || null,
+        model: config.model || null,
+        apiFormat: config.apiFormat,
+        maskedEnv: config.maskedEnv,
+        configParseError: config.parseError,
+        redactedSettingsConfig: safeConfigSummary(config),
+        providerType: textValue(row.provider_type) || null,
+        usable: Boolean(baseUrl && config.apiKey)
+      };
+    });
+    providers.sort((left, right) => {
+      const appTypeOrder = left.appType.localeCompare(right.appType, "en", {
+        sensitivity: "base"
+      });
+      if (appTypeOrder !== 0) return appTypeOrder;
+      const leftIndex = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
+      const rightIndex = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
+      if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+      return left.name.localeCompare(right.name, "zh-CN", {
+        numeric: true,
+        sensitivity: "base"
+      });
+    });
+    return { dbPath: path, providers };
   } finally {
     db.close();
   }
@@ -930,208 +1035,162 @@ function loadCcSwitchProviders(configuredPath = "") {
 function resolveCcSwitchProviderRuntime(options) {
   const { db } = openDatabase(options.dbPath ?? "");
   try {
-    const row = options.followCurrent ? db.prepare(`${PROVIDER_QUERY} WHERE app_type = ? AND is_current = 1 LIMIT 1`).get(options.appType) : db.prepare(`${PROVIDER_QUERY} WHERE app_type = ? AND id = ? LIMIT 1`).get(options.appType, options.providerId ?? "");
-    if (!row) {
-      throw new Error(
-        options.followCurrent ? `cc-switch \u672A\u8BBE\u7F6E ${options.appType} \u7684\u5168\u5C40\u5F53\u524D\u4F9B\u5E94\u5546` : "\u56FA\u5B9A\u7684 cc-switch \u4F9B\u5E94\u5546\u5DF2\u4E0D\u5B58\u5728\uFF0C\u8BF7\u91CD\u65B0\u9009\u62E9"
-      );
-    }
-    const providerRow = row;
-    const parsed = parseProviderConfig(providerRow.settings_config, providerRow.meta);
-    if (!parsed.baseUrl) throw new Error("\u8BE5\u4F9B\u5E94\u5546\u7F3A\u5C11 OpenAI \u517C\u5BB9 Base URL");
-    if (!parsed.apiKey) throw new Error("\u8BE5\u4F9B\u5E94\u5546\u7F3A\u5C11 API Key \u6216 Token");
-    if (parsed.apiFormat?.toLowerCase().includes("anthropic")) {
-      throw new Error("\u8BE5\u4F9B\u5E94\u5546\u4F7F\u7528 Anthropic \u539F\u751F\u534F\u8BAE\uFF0C\u4E0D\u80FD\u7528\u4E8E\u5F53\u524D\u603B\u7ED3\u5F15\u64CE");
-    }
+    const rows = db.prepare("SELECT * FROM providers WHERE app_type = ?").all(options.appType);
+    const row = options.followCurrent ? rows.find((item) => Number(item.is_current) === 1) : rows.find((item) => textValue(item.id) === (options.providerId ?? ""));
+    if (!row) throw new Error("\u672A\u627E\u5230\u6240\u9009\u4F9B\u5E94\u5546");
+    const appType = textValue(row.app_type);
+    const config = extractProviderConfig(
+      textValue(row.settings_config),
+      textValue(row.meta),
+      appType
+    );
+    const baseUrl = normalizeOpenAiBaseUrl(config.baseUrl);
+    if (!config.apiKey) throw new Error("\u4F9B\u5E94\u5546\u7F3A\u5C11\u53EF\u7528\u7684 API Key");
     return {
-      id: String(providerRow.id),
-      appType: String(providerRow.app_type),
-      name: String(providerRow.name),
-      baseUrl: parsed.baseUrl,
-      model: parsed.model,
-      apiFormat: parsed.apiFormat,
-      apiKey: parsed.apiKey
+      id: textValue(row.id),
+      appType,
+      name: textValue(row.name) || textValue(row.id),
+      baseUrl,
+      model: config.model || null,
+      apiFormat: config.apiFormat,
+      apiKey: config.apiKey
     };
   } finally {
     db.close();
   }
 }
-function normalizeOpenAiBaseUrl(baseUrl) {
-  const url = new URL(baseUrl.trim());
-  if (!["http:", "https:"].includes(url.protocol)) {
-    throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u5FC5\u987B\u4F7F\u7528 http \u6216 https");
+function normalizeOpenAiBaseUrl(value) {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("\u4F9B\u5E94\u5546\u7F3A\u5C11 Base URL");
+  let url;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error("\u4F9B\u5E94\u5546 Base URL \u65E0\u6548");
   }
-  if (url.username || url.password) {
-    throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u5305\u542B\u7528\u6237\u540D\u6216\u5BC6\u7801");
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("\u4F9B\u5E94\u5546 Base URL \u5FC5\u987B\u4F7F\u7528 HTTP \u6216 HTTPS");
   }
-  if (url.search || url.hash) {
-    throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u5305\u542B\u67E5\u8BE2\u53C2\u6570\u6216\u951A\u70B9");
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("\u4F9B\u5E94\u5546 Base URL \u4E0D\u80FD\u5305\u542B\u51ED\u636E\u3001\u67E5\u8BE2\u53C2\u6570\u6216\u951A\u70B9");
   }
   const path = url.pathname.replace(/\/+$/, "");
-  if (/\/(?:chat\/completions|responses|messages)$/i.test(path)) {
-    throw new Error("\u6A21\u578B\u63A5\u53E3 Base URL \u4E0D\u80FD\u4EE5 /chat/completions\u3001/responses \u6216 /messages \u7ED3\u5C3E");
+  if (/\/(?:chat\/completions|responses|messages|models)$/i.test(path)) {
+    throw new Error("\u4F9B\u5E94\u5546 Base URL \u5E94\u586B\u5199 API \u6839\u5730\u5740");
   }
   url.pathname = path || "/";
-  return url.toString();
+  return url.toString().replace(/\/$/, "");
+}
+function apiEndpoint(baseUrl, resource) {
+  const base = normalizeOpenAiBaseUrl(baseUrl);
+  return /\/v1$/i.test(base) ? `${base}/${resource}` : `${base}/v1/${resource}`;
 }
 function openAiModelsUrl(baseUrl) {
-  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
-  const path = url.pathname.replace(/\/+$/, "");
-  if (!path) {
-    url.pathname = "/v1/models";
-  } else if (!/\/models$/i.test(path)) {
-    url.pathname = `${path}/models`;
-  }
-  return url.toString();
+  return apiEndpoint(baseUrl, "models");
 }
-function modelIdsFromResponse(payload) {
+function authenticationHeaders(apiKey, apiFormat) {
+  return apiFormat === "anthropic_messages" ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" } : { Authorization: `Bearer ${apiKey}` };
+}
+function modelIdsFromPayload(payload) {
   const record = asRecord(payload);
   const candidates = Array.isArray(payload) ? payload : Array.isArray(record?.data) ? record.data : Array.isArray(record?.models) ? record.models : [];
   const models = candidates.map((item) => {
     if (typeof item === "string") return item.trim();
     const model = asRecord(item);
-    return textValue(model?.id) ?? textValue(model?.name) ?? textValue(model?.model) ?? "";
+    return textValue(model?.id) || textValue(model?.name) || textValue(model?.model);
   }).filter((model) => model.length > 0 && model.length <= 200);
   return [...new Set(models)].sort(
     (left, right) => left.localeCompare(right, "en", { numeric: true, sensitivity: "base" })
   );
 }
-function responseErrorDetail(text) {
-  try {
-    const payload = asRecord(JSON.parse(text));
-    const error = asRecord(payload?.error);
-    const detail = textValue(error?.message) ?? textValue(payload?.message);
-    return detail?.slice(0, 240) ?? "";
-  } catch {
-    return "";
-  }
+function requestError() {
+  return new Error("\u4F9B\u5E94\u5546\u8BF7\u6C42\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u4E0E\u914D\u7F6E");
 }
 async function fetchOpenAiCompatibleModels(options) {
   const endpoint = openAiModelsUrl(options.baseUrl);
-  const isAnthropic = normalizeApiFormat(options.apiFormat) === "anthropic_messages";
-  const headers = { Accept: "application/json" };
-  if (isAnthropic) {
-    headers["x-api-key"] = options.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-  } else {
-    headers.Authorization = `Bearer ${options.apiKey}`;
-  }
-  let timeout;
+  const apiFormat = normalizeApiFormat(options.apiFormat);
   try {
-    const response = await Promise.race([
-      (0, import_obsidian.requestUrl)({
-        url: endpoint,
-        method: "GET",
-        headers,
-        throw: false
-      }),
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("\u6A21\u578B\u63A5\u53E3\u8BF7\u6C42\u8D85\u65F6\uFF0815 \u79D2\uFF09")), 15e3);
-      })
-    ]);
-    if (response.status < 200 || response.status >= 300) {
-      const label = response.status === 401 ? "\u6A21\u578B\u63A5\u53E3\u9274\u6743\u5931\u8D25" : response.status === 403 ? "\u6A21\u578B\u63A5\u53E3\u8BF7\u6C42\u88AB\u62D2\u7EDD" : response.status === 404 ? "\u672A\u627E\u5230\u6A21\u578B\u63A5\u53E3" : "\u6A21\u578B\u63A5\u53E3\u8BF7\u6C42\u5931\u8D25";
-      const detail = responseErrorDetail(response.text);
-      throw new Error(`${label} (HTTP ${response.status})${detail ? `\uFF1A${detail}` : ""}`);
-    }
-    let payload;
-    try {
-      payload = JSON.parse(response.text);
-    } catch {
-      throw new Error("\u6A21\u578B\u63A5\u53E3\u6CA1\u6709\u8FD4\u56DE\u6709\u6548 JSON");
-    }
-    const models = modelIdsFromResponse(payload);
-    if (models.length === 0) {
-      throw new Error("\u6A21\u578B\u63A5\u53E3\u8FD4\u56DE\u6210\u529F\uFF0C\u4F46\u5217\u8868\u4E3A\u7A7A");
-    }
+    const response = await (0, import_obsidian.requestUrl)({
+      url: endpoint,
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...authenticationHeaders(options.apiKey, apiFormat)
+      },
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) throw requestError();
+    const models = modelIdsFromPayload(response.json);
     return { endpoint, models };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message.replaceAll(options.apiKey, "***"));
-  } finally {
-    if (timeout) clearTimeout(timeout);
+  } catch {
+    throw requestError();
   }
 }
 async function fetchCcSwitchProviderModels(options) {
   const runtime = resolveCcSwitchProviderRuntime({
-    dbPath: options.dbPath,
-    appType: options.appType,
-    followCurrent: false,
-    providerId: options.providerId
+    ...options,
+    followCurrent: false
   });
   return fetchOpenAiCompatibleModels({
     baseUrl: runtime.baseUrl,
-    apiKey: runtime.apiKey
+    apiKey: runtime.apiKey,
+    apiFormat: normalizeApiFormat(runtime.apiFormat)
   });
 }
-function openAiEndpointUrl(baseUrl, suffix) {
-  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
-  const path = url.pathname.replace(/\/+$/, "");
-  url.pathname = path ? `${path}/${suffix}` : `v1/${suffix}`;
-  return url.toString();
-}
-function httpStatusLabel(status) {
-  if (status === 401) return "\u9274\u6743\u5931\u8D25";
-  if (status === 403) return "\u8BF7\u6C42\u88AB\u62D2\u7EDD";
-  if (status === 404) return "\u6A21\u578B\u6216\u63A5\u53E3\u4E0D\u5B58\u5728";
-  if (status === 429) return "\u8BF7\u6C42\u9891\u7387\u8D85\u9650";
-  if (status >= 500) return "\u670D\u52A1\u7AEF\u4E0D\u53EF\u7528";
-  return "\u8BF7\u6C42\u5931\u8D25";
-}
 async function probeOpenAiCompatibleModel(options) {
-  const format = normalizeApiFormat(options.apiFormat);
-  const isAnthropic = format === "anthropic_messages";
-  const isResponses = format === "responses";
-  const endpoint = openAiEndpointUrl(
-    options.baseUrl,
-    isAnthropic ? "messages" : isResponses ? "responses" : "chat/completions"
-  );
-  const body = isAnthropic ? {
+  const endpoint = options.apiFormat === "anthropic_messages" ? apiEndpoint(options.baseUrl, "messages") : options.apiFormat === "responses" ? apiEndpoint(options.baseUrl, "responses") : apiEndpoint(options.baseUrl, "chat/completions");
+  const body = options.apiFormat === "anthropic_messages" ? {
     model: options.model,
-    max_tokens: 8,
+    max_tokens: 1,
     messages: [{ role: "user", content: "ping" }]
-  } : isResponses ? { model: options.model, input: "ping" } : {
+  } : options.apiFormat === "responses" ? { model: options.model, input: "ping", max_output_tokens: 16 } : {
     model: options.model,
     messages: [{ role: "user", content: "ping" }],
-    max_tokens: 8
+    max_tokens: 1
   };
-  const headers = {
-    "Content-Type": "application/json",
-    Accept: "application/json"
-  };
-  if (isAnthropic) {
-    headers["x-api-key"] = options.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-  } else {
-    headers.Authorization = `Bearer ${options.apiKey}`;
-  }
-  let timeout;
   try {
-    const response = await Promise.race([
-      (0, import_obsidian.requestUrl)({
-        url: endpoint,
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        throw: false
-      }),
-      new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("\u6A21\u578B\u8BF7\u6C42\u8D85\u65F6\uFF0830 \u79D2\uFF09")), 3e4);
-      })
-    ]);
-    if (response.status < 200 || response.status >= 300) {
-      const detail = responseErrorDetail(response.text);
-      const label = httpStatusLabel(response.status);
-      throw new Error(`${label} (HTTP ${response.status})${detail ? `\uFF1A${detail}` : ""}`);
-    }
+    const response = await (0, import_obsidian.requestUrl)({
+      url: endpoint,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authenticationHeaders(options.apiKey, options.apiFormat)
+      },
+      body: JSON.stringify(body),
+      throw: false
+    });
+    if (response.status < 200 || response.status >= 300) throw requestError();
     return { endpoint, model: options.model };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message.replaceAll(options.apiKey, "***"));
-  } finally {
-    if (timeout) clearTimeout(timeout);
+  } catch {
+    throw requestError();
   }
 }
+var import_node_fs, import_node_os, import_node_path, import_obsidian, BASE_URL_KEYS, MODEL_KEYS, FORMAT_KEYS;
+var init_ccswitch = __esm({
+  "src/ccswitch.ts"() {
+    import_node_fs = require("node:fs");
+    import_node_os = require("node:os");
+    import_node_path = require("node:path");
+    import_obsidian = require("obsidian");
+    init_dist();
+    BASE_URL_KEYS = /* @__PURE__ */ new Set(["baseurl", "apiurl", "endpoint"]);
+    MODEL_KEYS = /* @__PURE__ */ new Set(["model", "defaultmodel"]);
+    FORMAT_KEYS = /* @__PURE__ */ new Set(["apiformat", "wireapi", "protocol"]);
+  }
+});
+
+// src/main.ts
+var main_exports = {};
+__export(main_exports, {
+  default: () => VideoMemoPlugin
+});
+module.exports = __toCommonJS(main_exports);
+var import_node_child_process = require("node:child_process");
+var import_node_fs2 = require("node:fs");
+var import_node_readline = require("node:readline");
+var import_node_path2 = require("node:path");
+var import_obsidian6 = require("obsidian");
+init_ccswitch();
 
 // src/run-progress.ts
 var import_obsidian2 = require("obsidian");
@@ -1301,6 +1360,7 @@ var RunProgressModal = class extends import_obsidian2.Modal {
 };
 
 // src/settings.ts
+init_ccswitch();
 var DEFAULT_SETTINGS = {
   projectPath: "",
   providerSource: "ccswitch",
@@ -1419,212 +1479,27 @@ var import_obsidian4 = require("obsidian");
 
 // src/ccswitch-settings.ts
 var import_obsidian3 = require("obsidian");
-function icon(parent, name, className = "") {
-  const element = parent.createSpan({ cls: className });
-  (0, import_obsidian3.setIcon)(element, name);
-  return element;
-}
-function actionButton(parent, options) {
-  const button = parent.createEl("button", {
-    cls: `ccswitch-action${options.primary ? " is-primary" : ""}`,
-    attr: {
-      type: "button",
-      ...options.tooltip ? { "aria-label": options.tooltip } : {}
-    }
-  });
-  icon(button, options.icon, "ccswitch-action-icon");
-  button.createSpan({ text: options.label });
-  button.disabled = options.disabled ?? false;
-  button.addEventListener("click", options.onClick);
-  return button;
-}
-function badge(parent, label, tone) {
-  parent.createSpan({
-    cls: `ccswitch-badge is-${tone}`,
-    text: label
-  });
-}
-function metadataField(parent, label, value, iconName) {
-  const field = parent.createDiv({ cls: "ccswitch-meta-field" });
-  const labelRow = field.createDiv({ cls: "ccswitch-meta-label" });
-  icon(labelRow, iconName);
-  labelRow.createSpan({ text: label });
-  field.createDiv({
-    cls: `ccswitch-meta-value${value ? "" : " is-empty"}`,
-    text: value || "\u672A\u914D\u7F6E"
-  });
-}
-function providerSubtitle(provider) {
-  return provider.category || provider.model || provider.appType;
-}
-var CcSwitchProviderSettingsView = class {
-  options;
-  selectedAppType = "codex";
-  selectedProviderId = "";
-  visibleSource = null;
-  configTab = "parsed";
-  rawDetailExpanded = false;
-  providerModelStates = /* @__PURE__ */ new Map();
-  customModelStates = /* @__PURE__ */ new Map();
-  customDraft = null;
-  modelRequestId = 0;
-  constructor(options) {
-    this.options = options;
+init_ccswitch();
+var maskedKey = (value) => value.trim() ? `\u2022\u2022\u2022\u2022 ${value.trim().slice(-4)}` : "\u672A\u586B\u5199";
+var freshId = () => `cp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+var displayBaseUrl = (value) => {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return value ? "\u5DF2\u914D\u7F6E\u5730\u5740" : "\u672A\u8BC6\u522B Base URL";
   }
-  showProviderList() {
-    this.selectedProviderId = "";
-    this.visibleSource = null;
-    this.customDraft = null;
-    this.customModelStates.clear();
-    this.configTab = "parsed";
-    this.rawDetailExpanded = false;
-  }
-  customModelStateKey(draftId) {
-    return draftId ?? "__new_custom_provider__";
-  }
-  customModelStateFor(draftId) {
-    return this.customModelStates.get(this.customModelStateKey(draftId)) ?? null;
-  }
-  setCustomModelState(draftId, state) {
-    this.customModelStates.set(this.customModelStateKey(draftId), state);
-  }
-  render(parent) {
-    const settings = this.options.getSettings();
-    const source = this.visibleSource ?? settings.providerSource;
-    const section = parent.createDiv({ cls: "ccswitch-section" });
-    let response = null;
-    let loadError = "";
-    if (source === "ccswitch") {
-      try {
-        response = loadCcSwitchProviders(settings.ccSwitchDbPath);
-      } catch (error) {
-        loadError = error instanceof Error ? error.message : String(error);
-      }
-    }
-    const selectedProvider = response?.providers.find(
-      (provider) => provider.id === this.selectedProviderId
-    );
-    if (selectedProvider && response) {
-      this.selectedAppType = selectedProvider.appType;
-      this.renderDetailNavigation(section, selectedProvider);
-      const modelOptions = response.providers.filter((provider) => provider.appType === selectedProvider.appType).map((provider) => provider.model).filter((model) => Boolean(model));
-      const modelState = this.ensureProviderModels(selectedProvider);
-      const detail = section.createDiv({ cls: "ccswitch-provider-detail" });
-      this.renderProviderDetail(detail, selectedProvider, settings, modelOptions, modelState);
-      return true;
-    }
-    if (this.selectedProviderId) this.selectedProviderId = "";
-    const back = section.createDiv({ cls: "ccswitch-page-back" });
-    actionButton(back, {
-      label: "\u8FD4\u56DE\u8BBE\u7F6E",
-      icon: "arrow-left",
-      onClick: () => {
-        this.showProviderList();
-        this.options.onBack();
-      }
-    });
-    const heading = section.createDiv({ cls: "ccswitch-heading" });
-    const headingCopy = heading.createDiv();
-    headingCopy.createEl("h2", { text: "\u4F9B\u5E94\u5546" });
-    const sourceSwitch = heading.createDiv({
-      cls: "ccswitch-source-switch",
-      attr: { "aria-label": "\u4F9B\u5E94\u5546\u914D\u7F6E\u6765\u6E90" }
-    });
-    this.renderSourceButton(sourceSwitch, "cc-switch", "database", "ccswitch", source);
-    this.renderSourceButton(sourceSwitch, "\u81EA\u5B9A\u4E49", "sliders-horizontal", "custom", source);
-    if (source === "custom") {
-      this.renderCustomProvider(section, settings);
-      return false;
-    }
-    this.renderDatabaseCard(section, response?.dbPath ?? null, loadError);
-    if (!response) {
-      this.renderError(section, loadError);
-      return false;
-    }
-    const counts = /* @__PURE__ */ new Map();
-    for (const provider of response.providers) {
-      counts.set(provider.appType, (counts.get(provider.appType) ?? 0) + 1);
-    }
-    const appTypes = [...counts.keys()].sort((left, right) => {
-      if (left === "codex") return -1;
-      if (right === "codex") return 1;
-      return left.localeCompare(right);
-    });
-    if (!appTypes.includes(this.selectedAppType)) {
-      this.selectedAppType = appTypes.includes(settings.ccSwitchAppType) ? settings.ccSwitchAppType : appTypes[0] ?? "codex";
-    }
-    this.renderTypeTabs(section, appTypes, counts);
-    const visibleProviders = response.providers.filter(
-      (provider) => provider.appType === this.selectedAppType
-    );
-    section.createDiv({
-      cls: "ccswitch-provider-count",
-      text: `\u5171 ${visibleProviders.length} \u4E2A\u4F9B\u5E94\u5546`
-    });
-    if (visibleProviders.length === 0) {
-      const empty = section.createDiv({ cls: "ccswitch-empty" });
-      icon(empty, "package-open");
-      empty.createSpan({ text: "\u8BE5\u7C7B\u578B\u4E0B\u6CA1\u6709\u4F9B\u5E94\u5546" });
-      return false;
-    }
-    const list = section.createDiv({ cls: "ccswitch-provider-list" });
-    for (const provider of visibleProviders) {
-      this.renderProviderRow(list, provider, settings);
-    }
-    return false;
-  }
-  renderDetailNavigation(parent, provider) {
-    const navigation = parent.createDiv({ cls: "ccswitch-detail-navigation" });
-    actionButton(navigation, {
-      label: "\u8FD4\u56DE\u4F9B\u5E94\u5546",
-      icon: "arrow-left",
-      onClick: () => {
-        this.showProviderList();
-        this.options.rerender();
-      }
-    });
-    const copy = navigation.createDiv({ cls: "ccswitch-detail-navigation-copy" });
-    copy.createEl("h2", { text: provider.name });
-    copy.createDiv({ text: `${provider.appType} \u4F9B\u5E94\u5546\u914D\u7F6E` });
-  }
-  renderSourceButton(parent, label, iconName, source, visibleSource) {
-    const active = visibleSource === source;
-    const button = parent.createEl("button", {
-      cls: `ccswitch-source-button${active ? " is-active" : ""}`,
-      attr: { type: "button", "aria-pressed": String(active) }
-    });
-    icon(button, iconName);
-    button.createSpan({ text: label });
-    button.addEventListener("click", () => {
-      this.selectedProviderId = "";
-      this.visibleSource = source;
-      if (source === "custom") {
-        this.customDraft = null;
-        void this.options.updateSettings({ providerSource: "custom" }).then(() => {
-          this.options.rerender();
-        });
-        return;
-      }
-      void this.options.updateSettings({ providerSource: source }).then(() => {
-        this.options.rerender();
-      });
-    });
-  }
-  customDraftFromSettings() {
-    const settings = this.options.getSettings();
-    const active = settings.customProviders.find((p) => p.id === settings.activeCustomProviderId) ?? settings.customProviders[0];
-    if (active) {
-      return {
-        id: active.id,
-        name: active.name,
-        baseUrl: active.baseUrl,
-        apiKey: active.apiKey,
-        model: active.model,
-        apiFormat: active.apiFormat
-      };
-    }
-    return {
-      id: null,
+};
+var ProviderEditorModal = class extends import_obsidian3.Modal {
+  constructor(app, provider, save) {
+    super(app);
+    this.save = save;
+    this.draft = provider ? { ...provider } : {
+      id: freshId(),
       name: "",
       baseUrl: "",
       apiKey: "",
@@ -1632,787 +1507,312 @@ var CcSwitchProviderSettingsView = class {
       apiFormat: "chat_completions"
     };
   }
-  renderCustomProvider(parent, settings) {
-    const card = parent.createDiv({ cls: "ccswitch-custom-card" });
-    const heading = card.createDiv({ cls: "ccswitch-custom-heading" });
-    const title = heading.createDiv({ cls: "ccswitch-section-title" });
-    icon(title, "sliders-horizontal");
-    title.createSpan({ text: "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546" });
-    actionButton(heading, {
-      label: "\u6DFB\u52A0\u4F9B\u5E94\u5546",
-      icon: "plus",
-      onClick: () => {
-        this.customModelStates.delete(this.customModelStateKey(null));
-        this.customDraft = {
-          id: null,
-          name: "",
-          baseUrl: "",
-          apiKey: "",
-          model: "",
-          apiFormat: "chat_completions"
-        };
-        this.options.rerender();
-      }
+  save;
+  draft;
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("video-memo-provider-editor");
+    contentEl.createEl("h2", {
+      text: this.draft.name ? "\u7F16\u8F91\u4F9B\u5E94\u5546" : "\u6DFB\u52A0\u4F9B\u5E94\u5546"
     });
-    const providers = settings.customProviders;
-    if (providers.length > 0) {
-      const list = card.createDiv({ cls: "ccswitch-custom-provider-list" });
-      for (const provider of providers) {
-        this.renderCustomProviderRow(list, provider, settings);
-      }
-    }
-    const draft = this.customDraft ?? this.customDraftFromSettings();
-    this.renderCustomProviderForm(card, draft, settings);
-  }
-  renderCustomProviderRow(parent, provider, settings) {
-    const row = parent.createDiv({ cls: "ccswitch-custom-provider-entry" });
-    const isActive = settings.providerSource === "custom" && settings.activeCustomProviderId === provider.id;
-    const copy = row.createDiv({ cls: "ccswitch-custom-provider-entry-copy" });
-    copy.createDiv({
-      cls: "ccswitch-custom-provider-entry-name",
-      text: provider.name.trim() || "\u672A\u547D\u540D\u4F9B\u5E94\u5546"
-    });
-    const subtitle = provider.model.trim() || "\u5C1A\u672A\u9009\u62E9\u6A21\u578B";
-    const formatLabel = provider.apiFormat === "anthropic_messages" ? "Anthropic" : provider.apiFormat === "responses" ? "Responses" : "Chat";
-    copy.createDiv({
-      cls: "ccswitch-custom-provider-entry-sub",
-      text: `${subtitle} \xB7 ${formatLabel}`
-    });
-    if (isActive) badge(row, "\u4F7F\u7528\u4E2D", "accent");
-    const trailing = row.createDiv({ cls: "ccswitch-custom-provider-entry-actions" });
-    actionButton(trailing, {
-      label: isActive ? "\u4F7F\u7528\u4E2D" : "\u4F7F\u7528",
-      icon: isActive ? "check" : "play",
-      primary: !isActive,
-      disabled: isActive,
-      onClick: () => this.activateExistingProvider(provider.id)
-    });
-    actionButton(trailing, {
-      label: "\u7F16\u8F91",
-      icon: "pencil",
-      onClick: () => {
-        this.customDraft = {
-          id: provider.id,
-          name: provider.name,
-          baseUrl: provider.baseUrl,
-          apiKey: provider.apiKey,
-          model: provider.model,
-          apiFormat: provider.apiFormat
-        };
-        this.options.rerender();
-      }
-    });
-    actionButton(trailing, {
-      label: "\u5220\u9664",
-      icon: "trash-2",
-      onClick: () => this.deleteCustomProvider(provider.id)
-    });
-    row.addEventListener("click", (event) => {
-      if (event.target.closest("button")) return;
-      this.customDraft = {
-        id: provider.id,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        model: provider.model,
-        apiFormat: provider.apiFormat
-      };
-      this.options.rerender();
-    });
-  }
-  renderCustomProviderForm(parent, draft, settings) {
-    const form = parent.createDiv({ cls: "ccswitch-custom-form" });
-    const formTitle = form.createDiv({ cls: "ccswitch-custom-form-title" });
-    formTitle.createSpan({
-      text: draft.id ? "\u7F16\u8F91\u4F9B\u5E94\u5546" : "\u65B0\u4F9B\u5E94\u5546"
-    });
-    const modelState = this.customModelStateFor(draft.id);
-    const status = form.createDiv({
-      cls: `ccswitch-custom-status${modelState?.status === "loaded" ? " is-success" : modelState?.status === "error" ? " is-error" : ""}`,
-      text: this.customStatusText(draft.id)
-    });
-    let discoveredModelSelect = null;
-    const invalidateTest = () => {
-      this.customModelStates.delete(this.customModelStateKey(draft.id));
-      status.className = "ccswitch-custom-status is-warning";
-      status.setText("\u914D\u7F6E\u5DF2\u66F4\u6539\uFF0C\u8BF7\u91CD\u65B0\u6D4B\u8BD5\u8FDE\u63A5");
-      if (discoveredModelSelect) {
-        discoveredModelSelect.empty();
-        discoveredModelSelect.createEl("option", {
-          value: "",
-          text: "\u5237\u65B0\u540E\u53EF\u9009\u62E9\u6A21\u578B"
-        });
-        discoveredModelSelect.value = "";
-        discoveredModelSelect.disabled = true;
-      }
-    };
-    this.renderCustomTextField(form, {
-      label: "\u4F9B\u5E94\u5546\u540D\u79F0",
-      value: draft.name,
-      placeholder: "\u4F8B\u5982\uFF1AMy API",
-      onInput: (value) => {
-        draft.name = value;
-      }
-    });
-    this.renderCustomTextField(form, {
-      label: "API Base URL",
-      value: draft.baseUrl,
-      placeholder: "https://example.com/v1",
-      onInput: (value) => {
-        draft.baseUrl = value;
-        invalidateTest();
-      }
-    });
-    if (this.isUntrustedHttpUrl(draft.baseUrl)) {
-      form.createDiv({
-        cls: "ccswitch-custom-status is-warning",
-        text: "\u8FDC\u7A0B HTTP \u4F1A\u660E\u6587\u4F20\u8F93 API Key\uFF1B\u8BF7\u6539\u7528\u53EF\u4FE1 HTTPS\u3002localhost HTTP \u4E0D\u53D7\u6B64\u9650\u5236\u3002"
+    new import_obsidian3.Setting(contentEl).setName("\u540D\u79F0").addText(
+      (x) => x.setValue(this.draft.name).onChange((v) => {
+        this.draft.name = v.trim();
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("Base URL").addText(
+      (x) => x.setPlaceholder("https://api.example.com").setValue(this.draft.baseUrl).onChange((v) => {
+        this.draft.baseUrl = v.trim();
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("\u534F\u8BAE").addDropdown(
+      (x) => x.addOptions({
+        chat_completions: "Chat Completions",
+        responses: "Responses",
+        anthropic_messages: "Anthropic Messages"
+      }).setValue(this.draft.apiFormat).onChange((v) => {
+        this.draft.apiFormat = normalizeApiFormat(v);
+      })
+    );
+    new import_obsidian3.Setting(contentEl).setName("API Key").setDesc(`\u5F53\u524D\uFF1A${maskedKey(this.draft.apiKey)}`).addText((x) => {
+      x.inputEl.type = "password";
+      x.setPlaceholder(
+        this.draft.apiKey ? "\u8F93\u5165\u65B0\u503C\u6216\u4FDD\u7559\u73B0\u503C" : "\u8F93\u5165\u5BC6\u94A5"
+      ).onChange((v) => {
+        if (v) this.draft.apiKey = v.trim();
       });
-    }
-    const keyField = form.createDiv({ cls: "ccswitch-custom-field" });
-    keyField.createEl("label", { text: "API Key" });
-    const keyRow = keyField.createDiv({ cls: "ccswitch-custom-password-row" });
-    const keyInput = keyRow.createEl("input", {
-      attr: {
-        type: "password",
-        value: draft.apiKey,
-        placeholder: "sk-...",
-        autocomplete: "off",
-        "aria-label": "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546 API Key"
-      }
     });
-    keyInput.addEventListener("input", () => {
-      draft.apiKey = keyInput.value;
-      invalidateTest();
+    const modelSetting = new import_obsidian3.Setting(contentEl).setName("\u6A21\u578B").addText(
+      (x) => x.setValue(this.draft.model).onChange((v) => {
+        this.draft.model = v.trim();
+      })
+    );
+    const results = contentEl.createDiv({
+      cls: "video-memo-provider-model-results"
     });
-    const reveal = keyRow.createEl("button", {
-      cls: "clickable-icon ccswitch-custom-key-toggle",
-      attr: { type: "button", "aria-label": "\u663E\u793A API Key", "aria-pressed": "false" }
-    });
-    (0, import_obsidian3.setIcon)(reveal, "eye");
-    reveal.addEventListener("click", () => {
-      const visible = keyInput.type === "text";
-      keyInput.type = visible ? "password" : "text";
-      reveal.setAttribute("aria-label", visible ? "\u663E\u793A API Key" : "\u9690\u85CF API Key");
-      reveal.setAttribute("aria-pressed", String(!visible));
-      (0, import_obsidian3.setIcon)(reveal, visible ? "eye" : "eye-off");
-    });
-    keyField.createDiv({
-      cls: "ccswitch-custom-hint is-warning",
-      text: "API Key \u4F1A\u660E\u6587\u4FDD\u5B58\u5728\u5F53\u524D Vault \u7684\u63D2\u4EF6 data.json\uFF1B\u4E0D\u4F1A\u5199\u5165\u65E5\u5FD7\u6216\u547D\u4EE4\u884C\u3002"
-    });
-    const formatField = form.createDiv({ cls: "ccswitch-custom-field" });
-    formatField.createEl("label", { text: "API \u683C\u5F0F" });
-    const formatSelect = formatField.createEl("select", {
-      cls: "dropdown ccswitch-custom-select",
-      attr: { "aria-label": "\u9009\u62E9 API \u683C\u5F0F" }
-    });
-    formatSelect.createEl("option", { value: "anthropic_messages", text: "Anthropic Messages" });
-    formatSelect.createEl("option", { value: "chat_completions", text: "Chat Completions" });
-    formatSelect.createEl("option", { value: "responses", text: "Responses API" });
-    formatSelect.value = draft.apiFormat;
-    formatSelect.addEventListener("change", () => {
-      draft.apiFormat = normalizeApiFormat(formatSelect.value);
-      invalidateTest();
-    });
-    const modelField = form.createDiv({ cls: "ccswitch-custom-field" });
-    modelField.createEl("label", { text: "\u6A21\u578B" });
-    const modelRow = modelField.createDiv({ cls: "ccswitch-custom-model-controls" });
-    const models = modelState?.status === "loaded" ? modelState.models : [];
-    const modelSelect = modelRow.createEl("select", {
-      cls: "dropdown ccswitch-custom-model-select",
-      attr: { "aria-label": "\u9009\u62E9\u5DF2\u53D1\u73B0\u6A21\u578B" }
-    });
-    discoveredModelSelect = modelSelect;
-    modelSelect.createEl("option", {
-      value: "",
-      text: models.length > 0 ? "\u9009\u62E9\u5DF2\u53D1\u73B0\u6A21\u578B\u2026" : "\u5237\u65B0\u540E\u53EF\u9009\u62E9\u6A21\u578B"
-    });
-    for (const model of models) {
-      modelSelect.createEl("option", { value: model, text: model });
-    }
-    modelSelect.disabled = models.length === 0;
-    modelSelect.value = models.includes(draft.model) ? draft.model : "";
-    const modelInput = modelRow.createEl("input", {
-      cls: "ccswitch-custom-model-input",
-      attr: {
-        type: "text",
-        value: draft.model,
-        placeholder: "\u4E5F\u53EF\u624B\u52A8\u8F93\u5165\u6A21\u578B\u540D\u79F0",
-        "aria-label": "\u624B\u52A8\u8F93\u5165\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u6A21\u578B"
-      }
-    });
-    modelSelect.addEventListener("change", () => {
-      if (!modelSelect.value) return;
-      draft.model = modelSelect.value;
-      modelInput.value = modelSelect.value;
-    });
-    modelInput.addEventListener("input", () => {
-      draft.model = modelInput.value;
-      modelSelect.value = models.includes(modelInput.value) ? modelInput.value : "";
-    });
-    const actions = form.createDiv({ cls: "ccswitch-custom-action-row" });
-    const loading = modelState?.status === "loading";
-    actionButton(actions, {
-      label: loading ? "\u8FDE\u63A5\u4E2D..." : "\u5237\u65B0\u6A21\u578B",
-      icon: loading ? "loader-circle" : "refresh-cw",
-      disabled: loading,
-      onClick: () => this.startCustomModelRequest(false)
-    });
-    actionButton(actions, {
-      label: loading ? "\u6D4B\u8BD5\u4E2D..." : "\u6D4B\u8BD5\u8FDE\u63A5",
-      icon: loading ? "loader-circle" : "plug-zap",
-      disabled: loading,
-      onClick: () => this.startCustomModelRequest(true)
-    });
-    actionButton(actions, {
-      label: draft.id ? "\u4FDD\u5B58\u5E76\u4F7F\u7528" : "\u6DFB\u52A0\u5E76\u4F7F\u7528",
-      icon: "check",
-      primary: true,
-      onClick: () => this.saveCustomProvider()
-    });
+    new import_obsidian3.Setting(contentEl).addButton(
+      (button) => button.setButtonText("\u53D1\u73B0\u6A21\u578B").onClick(async () => {
+        button.setDisabled(true);
+        results.empty();
+        try {
+          const response = await fetchOpenAiCompatibleModels(this.draft);
+          if (!response.models.length) {
+            results.setText("\u670D\u52A1\u672A\u8FD4\u56DE\u6A21\u578B\u5217\u8868");
+            return;
+          }
+          new import_obsidian3.Setting(results).setName("\u53EF\u7528\u6A21\u578B").addDropdown((dropdown) => {
+            dropdown.addOption("", "\u9009\u62E9\u6A21\u578B");
+            for (const model of response.models)
+              dropdown.addOption(model, model);
+            dropdown.onChange((value) => {
+              if (value) {
+                this.draft.model = value;
+                const input = modelSetting.controlEl.querySelector("input");
+                if (input) input.value = value;
+              }
+            });
+          });
+        } catch {
+          new import_obsidian3.Notice("\u6A21\u578B\u53D1\u73B0\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E");
+        } finally {
+          button.setDisabled(false);
+        }
+      })
+    ).addButton(
+      (button) => button.setButtonText("\u6D4B\u8BD5\u8FDE\u63A5").onClick(async () => {
+        if (!this.valid()) return;
+        button.setDisabled(true);
+        try {
+          await probeOpenAiCompatibleModel(this.draft);
+          new import_obsidian3.Notice("\u8FDE\u63A5\u6D4B\u8BD5\u6210\u529F");
+        } catch {
+          new import_obsidian3.Notice("\u8FDE\u63A5\u6D4B\u8BD5\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E");
+        } finally {
+          button.setDisabled(false);
+        }
+      })
+    );
+    new import_obsidian3.Setting(contentEl).addButton((b) => b.setButtonText("\u53D6\u6D88").onClick(() => this.close())).addButton(
+      (b) => b.setCta().setButtonText("\u4FDD\u5B58").onClick(async () => {
+        if (!this.valid()) return;
+        b.setDisabled(true);
+        await this.save({ ...this.draft });
+        this.close();
+      })
+    );
   }
-  renderCustomTextField(parent, options) {
-    const field = parent.createDiv({ cls: "ccswitch-custom-field" });
-    field.createEl("label", { text: options.label });
-    const input = field.createEl("input", {
-      attr: { type: "text", value: options.value, placeholder: options.placeholder }
-    });
-    input.addEventListener("input", () => options.onInput(input.value));
-  }
-  isUntrustedHttpUrl(value) {
-    try {
-      const url = new URL(value.trim());
-      if (url.protocol !== "http:") return false;
-      return !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname.toLowerCase());
-    } catch {
+  valid() {
+    if (!this.draft.name || !this.draft.baseUrl || !this.draft.apiKey || !this.draft.model) {
+      new import_obsidian3.Notice("\u8BF7\u586B\u5199\u540D\u79F0\u3001Base URL\u3001API Key \u548C\u6A21\u578B");
       return false;
     }
-  }
-  customStatusText(draftId) {
-    const state = this.customModelStateFor(draftId);
-    if (!state) return "\u5C1A\u672A\u6D4B\u8BD5\u8FDE\u63A5";
-    if (state.status === "loading") return "\u6B63\u5728\u83B7\u53D6\u6A21\u578B\u5217\u8868...";
-    if (state.status === "error") return `\u6A21\u578B\u5217\u8868\u83B7\u53D6\u5931\u8D25\uFF1A${state.error}`;
-    if (state.probeStatus === "probing") return "\u6B63\u5728\u53D1\u9001\u771F\u5B9E\u6A21\u578B\u8BF7\u6C42...";
-    if (state.probeStatus === "probe_error") return `\u6A21\u578B\u8C03\u7528\u5931\u8D25\uFF1A${state.probeError}`;
-    if (state.probeStatus === "probed") return `\u6A21\u578B\u8C03\u7528\u6210\u529F\uFF1A\u53D1\u73B0 ${state.models.length} \u4E2A\u6A21\u578B\uFF0C\u6A21\u578B\u53EF\u6B63\u5E38\u8C03\u7528`;
-    return `\u6A21\u578B\u63A5\u53E3\u53EF\u7528\uFF1A\u53D1\u73B0 ${state.models.length} \u4E2A\u6A21\u578B\uFF08\u672A\u6D4B\u8BD5\u6A21\u578B\u8C03\u7528\uFF09`;
-  }
-  startCustomModelRequest(showNotice) {
-    const draft = this.customDraft ??= this.customDraftFromSettings();
-    const draftId = draft.id;
-    if (!draft.baseUrl.trim() || !draft.apiKey.trim()) {
-      const message = "\u8BF7\u5148\u586B\u5199 API Base URL \u548C API Key";
-      this.setCustomModelState(draftId, {
-        requestId: ++this.modelRequestId,
-        status: "error",
-        models: [],
-        endpoint: "",
-        error: message,
-        probeStatus: "idle",
-        probeError: ""
-      });
-      if (showNotice) new import_obsidian3.Notice(message);
-      this.options.rerender();
-      return;
-    }
-    const requestId = ++this.modelRequestId;
-    this.setCustomModelState(draftId, {
-      requestId,
-      status: "loading",
-      models: [],
-      endpoint: "",
-      error: "",
-      probeStatus: "idle",
-      probeError: ""
-    });
-    this.options.rerender();
-    void fetchOpenAiCompatibleModels({
-      baseUrl: draft.baseUrl,
-      apiKey: draft.apiKey,
-      apiFormat: draft.apiFormat
-    }).then((response) => {
-      const current = this.customModelStateFor(draftId);
-      if (current?.requestId !== requestId) return;
-      this.setCustomModelState(draftId, {
-        requestId,
-        status: "loaded",
-        models: response.models,
-        endpoint: response.endpoint,
-        error: "",
-        probeStatus: "idle",
-        probeError: ""
-      });
-      if (!draft.model && response.models.length > 0) draft.model = response.models[0];
-      if (showNotice) {
-        this.probeModel(draft, requestId);
-      } else {
-        new import_obsidian3.Notice(`\u5237\u65B0\u6210\u529F\uFF0C\u53D1\u73B0 ${response.models.length} \u4E2A\u6A21\u578B`);
-        this.options.rerender();
-      }
-    }).catch((error) => {
-      const current = this.customModelStateFor(draftId);
-      if (current?.requestId !== requestId) return;
-      const message = error instanceof Error ? error.message : String(error);
-      this.setCustomModelState(draftId, {
-        requestId,
-        status: "error",
-        models: [],
-        endpoint: "",
-        error: message,
-        probeStatus: "idle",
-        probeError: ""
-      });
-      if (showNotice) new import_obsidian3.Notice(`\u8FDE\u63A5\u5931\u8D25
-${message}`, 8e3);
-      this.options.rerender();
-    });
-  }
-  probeModel(draft, listRequestId) {
-    const draftId = draft.id;
-    const model = draft.model.trim();
-    if (!model) {
-      const current2 = this.customModelStateFor(draftId);
-      if (current2?.requestId === listRequestId) {
-        this.setCustomModelState(draftId, {
-          ...current2,
-          probeStatus: "probe_error",
-          probeError: "\u8BF7\u5148\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0"
-        });
-        new import_obsidian3.Notice("\u8BF7\u5148\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0", 8e3);
-        this.options.rerender();
-      }
-      return;
-    }
-    const current = this.customModelStateFor(draftId);
-    if (current?.requestId === listRequestId) {
-      this.setCustomModelState(draftId, { ...current, probeStatus: "probing" });
-      this.options.rerender();
-    }
-    void probeOpenAiCompatibleModel({
-      baseUrl: draft.baseUrl,
-      apiKey: draft.apiKey,
-      model,
-      apiFormat: draft.apiFormat
-    }).then(() => {
-      const state = this.customModelStateFor(draftId);
-      if (state?.requestId !== listRequestId) return;
-      this.setCustomModelState(draftId, { ...state, probeStatus: "probed", probeError: "" });
-      new import_obsidian3.Notice(`\u8FDE\u63A5\u6210\u529F\uFF0C\u6A21\u578B ${model} \u53EF\u6B63\u5E38\u8C03\u7528`);
-      this.options.rerender();
-    }).catch((error) => {
-      const state = this.customModelStateFor(draftId);
-      if (state?.requestId !== listRequestId) return;
-      const message = error instanceof Error ? error.message : String(error);
-      this.setCustomModelState(draftId, { ...state, probeStatus: "probe_error", probeError: message });
-      new import_obsidian3.Notice(`\u6A21\u578B\u8C03\u7528\u5931\u8D25
-${message}`, 8e3);
-      this.options.rerender();
-    });
-  }
-  saveCustomProvider() {
-    const draft = this.customDraft ??= this.customDraftFromSettings();
     try {
-      const name = draft.name.trim();
-      const baseUrl = normalizeOpenAiBaseUrl(draft.baseUrl);
-      const apiKey = draft.apiKey.trim();
-      const model = draft.model.trim();
-      if (!name) throw new Error("\u8BF7\u586B\u5199\u4F9B\u5E94\u5546\u540D\u79F0");
-      if (!apiKey) throw new Error("\u8BF7\u586B\u5199 API Key");
-      if (!model) throw new Error("\u8BF7\u9009\u62E9\u6216\u8F93\u5165\u6A21\u578B\u540D\u79F0");
-      const settings = this.options.getSettings();
-      const isNew = draft.id === null;
-      const previousStateKey = this.customModelStateKey(draft.id);
-      let providers;
-      let activeId;
-      if (draft.id) {
-        providers = settings.customProviders.map(
-          (p) => p.id === draft.id ? { id: p.id, name, baseUrl, apiKey, model, apiFormat: draft.apiFormat } : p
-        );
-        activeId = draft.id;
-      } else {
-        const newId = `cp_${Date.now()}`;
-        providers = [
-          ...settings.customProviders,
-          { id: newId, name, baseUrl, apiKey, model, apiFormat: draft.apiFormat }
-        ];
-        activeId = newId;
-        draft.id = newId;
-        const pendingState = this.customModelStates.get(previousStateKey);
-        if (pendingState) {
-          this.customModelStates.set(newId, pendingState);
-          this.customModelStates.delete(previousStateKey);
-        }
-      }
-      void this.options.updateSettings({
-        providerSource: "custom",
-        customProviders: providers,
-        activeCustomProviderId: activeId
-      }).then(() => {
-        this.customDraft = this.customDraftFromSettings();
-        new import_obsidian3.Notice(isNew ? "\u5DF2\u6DFB\u52A0\u4F9B\u5E94\u5546" : "\u5DF2\u4FDD\u5B58\u4F9B\u5E94\u5546");
-        this.options.rerender();
-      });
-    } catch (error) {
-      new import_obsidian3.Notice(error instanceof Error ? error.message : String(error), 8e3);
+      const u = new URL(this.draft.baseUrl);
+      if (u.protocol !== "https:" && u.hostname !== "localhost" && u.hostname !== "127.0.0.1")
+        throw new Error();
+    } catch {
+      new import_obsidian3.Notice("Base URL \u5FC5\u987B\u662F HTTPS\uFF0C\u6216\u672C\u673A\u5730\u5740");
+      return false;
     }
+    return true;
   }
-  activateExistingProvider(providerId) {
-    void this.options.updateSettings({
-      providerSource: "custom",
-      activeCustomProviderId: providerId
-    }).then(() => {
-      new import_obsidian3.Notice("\u5DF2\u5207\u6362\u4F9B\u5E94\u5546");
-      this.options.rerender();
-    });
+  onClose() {
+    this.contentEl.empty();
   }
-  deleteCustomProvider(providerId) {
+};
+var CcSwitchProviderSettingsView = class {
+  constructor(options) {
+    this.options = options;
+  }
+  options;
+  showProviderList() {
+  }
+  render(parent) {
+    parent.addClass("video-memo-provider-view");
     const settings = this.options.getSettings();
-    const providers = settings.customProviders.filter((p) => p.id !== providerId);
-    let activeId = settings.activeCustomProviderId;
-    if (activeId === providerId) {
-      activeId = providers[0]?.id ?? "";
-    }
-    void this.options.updateSettings({
-      customProviders: providers,
-      activeCustomProviderId: activeId
-    }).then(() => {
-      this.customModelStates.delete(providerId);
-      this.customDraft = null;
-      new import_obsidian3.Notice("\u5DF2\u5220\u9664\u4F9B\u5E94\u5546");
-      this.options.rerender();
-    });
-  }
-  renderDatabaseCard(parent, connectedPath, loadError) {
-    const settings = this.options.getSettings();
-    const card = parent.createDiv({ cls: "ccswitch-database-card" });
-    const top = card.createDiv({ cls: "ccswitch-database-top" });
-    const identity = top.createDiv({ cls: "ccswitch-database-identity" });
-    const tile = identity.createDiv({ cls: "ccswitch-icon-tile" });
-    icon(tile, "database");
-    const copy = identity.createDiv({ cls: "ccswitch-database-copy" });
-    const title = copy.createDiv({ cls: "ccswitch-database-title" });
-    title.createSpan({ text: "cc-switch \u6570\u636E\u5E93" });
-    badge(title, connectedPath ? "\u5DF2\u8FDE\u63A5" : "\u672A\u8FDE\u63A5", connectedPath ? "accent" : "neutral");
-    copy.createDiv({
-      cls: "ccswitch-database-description",
-      text: "\u53EA\u8BFB\u89E3\u6790\u4F9B\u5E94\u5546\u914D\u7F6E\uFF1B\u5BC6\u94A5\u5DF2\u8131\u654F\uFF0C\u7559\u7A7A\u4F7F\u7528\u9ED8\u8BA4\u8DEF\u5F84\u3002"
-    });
-    const controls = top.createDiv({ cls: "ccswitch-database-controls" });
-    const fileInput = card.createEl("input", {
-      cls: "ccswitch-hidden-input",
-      attr: { type: "file", accept: ".db" }
-    });
-    fileInput.addEventListener("change", () => {
-      const file = fileInput.files?.[0];
-      if (!file) return;
-      const electron = require("electron");
-      const path = electron.webUtils?.getPathForFile(file) ?? file.path ?? "";
-      if (!path) {
-        new import_obsidian3.Notice("\u65E0\u6CD5\u8BFB\u53D6\u6240\u9009\u6570\u636E\u5E93\u7684\u672C\u5730\u8DEF\u5F84");
-        return;
-      }
-      void this.options.updateSettings({ ccSwitchDbPath: path }).then(() => {
-        this.selectedProviderId = "";
-        this.providerModelStates.clear();
-        this.options.rerender();
-      });
-    });
-    actionButton(controls, {
-      label: "\u9009\u62E9\u6587\u4EF6",
-      icon: "folder-open",
-      onClick: () => fileInput.click()
-    });
-    if (settings.ccSwitchDbPath) {
-      actionButton(controls, {
-        label: "\u9ED8\u8BA4\u8DEF\u5F84",
-        icon: "undo-2",
-        onClick: () => {
-          void this.options.updateSettings({ ccSwitchDbPath: "" }).then(() => {
-            this.selectedProviderId = "";
-            this.providerModelStates.clear();
-            this.options.rerender();
-          });
-        }
-      });
-    }
-    actionButton(controls, {
-      label: "\u5237\u65B0",
-      icon: "refresh-cw",
-      onClick: () => {
-        this.providerModelStates.clear();
-        this.options.rerender();
-      }
-    });
-    card.createEl("code", {
-      cls: "ccswitch-database-path",
-      text: connectedPath ?? (settings.ccSwitchDbPath || defaultCcSwitchDbPath()),
-      attr: { title: loadError || connectedPath || "" }
-    });
-  }
-  renderError(parent, message) {
-    const error = parent.createDiv({ cls: "ccswitch-error" });
-    icon(error, "triangle-alert");
-    const text = error.createDiv();
-    text.createEl("strong", { text: "\u65E0\u6CD5\u8BFB\u53D6 cc-switch" });
-    text.createDiv({ text: message || "\u672A\u77E5\u9519\u8BEF" });
-  }
-  renderTypeTabs(parent, appTypes, counts) {
-    const tabs = parent.createDiv({ cls: "ccswitch-type-tabs" });
-    for (const appType of appTypes) {
-      const button = tabs.createEl("button", {
-        cls: `ccswitch-type-tab${appType === this.selectedAppType ? " is-active" : ""}`,
-        text: `${appType} (${counts.get(appType) ?? 0})`,
-        attr: { type: "button" }
-      });
-      button.addEventListener("click", () => {
-        this.selectedAppType = appType;
-        this.selectedProviderId = "";
-        this.options.rerender();
-      });
-    }
-  }
-  isProviderActive(provider, settings) {
-    if (settings.providerSource !== "ccswitch") return false;
-    if (settings.ccSwitchAppType !== provider.appType) return false;
-    return settings.ccSwitchFollowCurrent ? provider.isCurrent : provider.id === settings.ccSwitchProviderId;
-  }
-  renderProviderRow(parent, provider, settings) {
-    const active = this.isProviderActive(provider, settings);
-    const row = parent.createEl("button", {
-      cls: `ccswitch-provider-row${active ? " is-active" : ""}`,
-      attr: { type: "button", "aria-label": `\u67E5\u770B ${provider.name} \u914D\u7F6E` }
-    });
-    const tile = row.createDiv({ cls: "ccswitch-provider-icon" });
-    icon(tile, provider.usable ? "server" : "server-off");
-    const copy = row.createDiv({ cls: "ccswitch-provider-row-copy" });
-    copy.createDiv({ cls: "ccswitch-provider-name", text: provider.name });
-    copy.createDiv({ cls: "ccswitch-provider-subtitle", text: providerSubtitle(provider) });
-    const trailing = row.createDiv({ cls: "ccswitch-provider-trailing" });
-    if (active) badge(trailing, "\u4F7F\u7528\u4E2D", "accent");
-    else if (provider.isCurrent) badge(trailing, "\u5168\u5C40\u5F53\u524D", "neutral");
-    icon(trailing, "chevron-right");
-    row.addEventListener("click", () => {
-      this.selectedProviderId = provider.id;
-      this.configTab = "parsed";
-      this.rawDetailExpanded = false;
-      this.providerModelStates.delete(this.providerModelKey(provider));
-      this.options.rerender();
-    });
-  }
-  renderProviderDetail(parent, provider, settings, modelOptions, modelState) {
-    const hero = parent.createDiv({ cls: "ccswitch-detail-hero" });
-    const heroMain = hero.createDiv({ cls: "ccswitch-detail-main" });
-    const tile = heroMain.createDiv({ cls: "ccswitch-detail-icon" });
-    icon(tile, "boxes");
-    const copy = heroMain.createDiv({ cls: "ccswitch-detail-copy" });
-    const title = copy.createDiv({ cls: "ccswitch-detail-title" });
-    title.createEl("h3", { text: provider.name });
-    if (provider.isCurrent) badge(title, "\u5168\u5C40\u5F53\u524D", "accent");
-    if (!provider.usable) badge(title, "\u914D\u7F6E\u4E0D\u53EF\u7528", "danger");
-    copy.createDiv({
-      cls: "ccswitch-detail-notes",
-      text: provider.notes || provider.websiteUrl || "\u6765\u81EA cc-switch \u7684\u4F9B\u5E94\u5546\u914D\u7F6E"
-    });
-    const actions = hero.createDiv({ cls: "ccswitch-detail-actions" });
-    const pinned = settings.providerSource === "ccswitch" && !settings.ccSwitchFollowCurrent && settings.ccSwitchAppType === provider.appType && settings.ccSwitchProviderId === provider.id;
-    actionButton(actions, {
-      label: pinned ? "\u5DF2\u56FA\u5B9A\u6B64\u4F9B\u5E94\u5546" : "\u56FA\u5B9A\u4F7F\u7528\u6B64\u4F9B\u5E94\u5546",
-      icon: pinned ? "check" : "pin",
-      primary: !pinned,
-      disabled: pinned || !provider.usable,
-      onClick: () => {
-        void this.options.updateSettings({
-          providerSource: "ccswitch",
-          ccSwitchAppType: provider.appType,
-          ccSwitchFollowCurrent: false,
-          ccSwitchProviderId: provider.id
-        }).then(() => this.options.rerender());
-      }
-    });
-    actionButton(actions, {
-      label: "\u8DDF\u968F\u5168\u5C40\u5F53\u524D",
-      icon: "refresh-cw",
-      disabled: settings.providerSource === "ccswitch" && settings.ccSwitchFollowCurrent && settings.ccSwitchAppType === provider.appType,
-      onClick: () => {
-        void this.options.updateSettings({
-          providerSource: "ccswitch",
-          ccSwitchAppType: provider.appType,
-          ccSwitchFollowCurrent: true,
-          ccSwitchProviderId: ""
-        }).then(() => this.options.rerender());
-      }
-    });
-    this.renderModelSelector(parent, provider, settings, modelOptions, modelState);
-    const metadata = parent.createDiv({ cls: "ccswitch-metadata-grid" });
-    metadataField(metadata, "CLI \u7C7B\u578B", provider.appType, "terminal");
-    metadataField(metadata, "Base URL", provider.baseUrl, "link-2");
-    metadataField(metadata, "\u6A21\u578B", provider.model, "cpu");
-    metadataField(metadata, "API \u683C\u5F0F", provider.apiFormat, "braces");
-    const rawToggle = parent.createEl("button", {
-      cls: "ccswitch-raw-toggle",
-      attr: {
-        type: "button",
-        "aria-expanded": String(this.rawDetailExpanded)
-      }
-    });
-    icon(rawToggle, this.rawDetailExpanded ? "chevron-down" : "chevron-right");
-    rawToggle.createSpan({ text: "\u67E5\u770B\u539F\u59CB\u914D\u7F6E\uFF08\u5DF2\u8131\u654F\uFF09" });
-    rawToggle.addEventListener("click", () => {
-      this.rawDetailExpanded = !this.rawDetailExpanded;
-      this.options.rerender();
-    });
-    if (!this.rawDetailExpanded) return;
-    const envSection = parent.createDiv({ cls: "ccswitch-detail-section" });
-    const envTitle = envSection.createDiv({ cls: "ccswitch-section-title" });
-    icon(envTitle, "key-round");
-    envTitle.createSpan({ text: "\u73AF\u5883\u53D8\u91CF" });
-    const envEntries = Object.entries(provider.maskedEnv);
-    if (envEntries.length === 0) {
-      envSection.createDiv({ cls: "ccswitch-muted", text: "\u6CA1\u6709\u53EF\u663E\u793A\u7684\u73AF\u5883\u53D8\u91CF" });
-    } else {
-      const envGrid = envSection.createDiv({ cls: "ccswitch-env-grid" });
-      for (const [key, value] of envEntries) {
-        const card = envGrid.createDiv({ cls: "ccswitch-env-card" });
-        card.createDiv({ cls: "ccswitch-env-key", text: key });
-        card.createEl("code", { text: value });
-      }
-    }
-    const configSection = parent.createDiv({ cls: "ccswitch-detail-section" });
-    const configTitle = configSection.createDiv({ cls: "ccswitch-section-title" });
-    icon(configTitle, "braces");
-    configTitle.createSpan({ text: "\u914D\u7F6E" });
-    const tabs = configSection.createDiv({ cls: "ccswitch-config-tabs" });
-    this.renderConfigTab(tabs, "\u89E3\u6790\u7ED3\u679C", "parsed");
-    this.renderConfigTab(tabs, "\u4F9B\u5E94\u5546\u914D\u7F6E", "raw");
-    const parsedConfig = JSON.stringify(
-      {
-        baseUrl: provider.baseUrl,
-        model: provider.model,
-        apiFormat: provider.apiFormat,
-        environment: provider.maskedEnv
-      },
-      null,
-      2
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-header").setName("\u4F9B\u5E94\u5546\u8BBE\u7F6E").addExtraButton(
+      (b) => b.setIcon("arrow-left").setTooltip("\u8FD4\u56DE").onClick(this.options.onBack)
     );
-    const content = this.configTab === "parsed" ? parsedConfig : provider.redactedSettingsConfig;
-    const codeHeader = configSection.createDiv({ cls: "ccswitch-code-header" });
-    codeHeader.createSpan({
-      text: this.configTab === "parsed" ? "\u63D2\u4EF6\u5B9E\u9645\u4F7F\u7528\u7684\u89E3\u6790\u7ED3\u679C" : "\u5BC6\u94A5\u5DF2\u8131\u654F"
-    });
-    const copyButton = codeHeader.createEl("button", {
-      cls: "clickable-icon",
-      attr: { type: "button", "aria-label": "\u590D\u5236\u914D\u7F6E" }
-    });
-    (0, import_obsidian3.setIcon)(copyButton, "copy");
-    copyButton.addEventListener("click", () => {
-      void navigator.clipboard.writeText(content).then(() => new import_obsidian3.Notice("\u914D\u7F6E\u5DF2\u590D\u5236")).catch(() => new import_obsidian3.Notice("\u590D\u5236\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u9009\u62E9\u914D\u7F6E"));
-    });
-    configSection.createEl("pre", { cls: "ccswitch-code-block", text: content });
+    new import_obsidian3.Setting(parent).setName("\u914D\u7F6E\u6765\u6E90").setClass("video-memo-provider-source").addDropdown(
+      (d) => d.addOptions({
+        ccswitch: "cc-switch \u6570\u636E\u5E93",
+        custom: "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546"
+      }).setValue(settings.providerSource).onChange(async (v) => {
+        await this.options.updateSettings({
+          providerSource: v
+        });
+        this.options.rerender();
+      })
+    );
+    if (settings.providerSource === "custom")
+      this.renderCustom(parent, settings);
+    else this.renderCcSwitch(parent, settings);
+    return true;
   }
-  renderModelSelector(parent, provider, settings, fallbackModels, modelState) {
-    const card = parent.createDiv({ cls: "ccswitch-model-selector" });
-    const copy = card.createDiv({ cls: "ccswitch-model-selector-copy" });
-    const title = copy.createDiv({ cls: "ccswitch-section-title" });
-    icon(title, "cpu");
-    title.createSpan({ text: "\u603B\u7ED3\u6A21\u578B" });
-    const statusText = modelState.status === "loading" ? "\u6B63\u5728\u4F7F\u7528\u4F9B\u5E94\u5546 Key \u548C URL \u83B7\u53D6\u6A21\u578B\u5217\u8868..." : modelState.status === "loaded" ? `\u5DF2\u5B9E\u65F6\u83B7\u53D6 ${modelState.models.length} \u4E2A\u6A21\u578B` : `\u5B9E\u65F6\u83B7\u53D6\u5931\u8D25\uFF1A${modelState.error}\uFF1B\u5F53\u524D\u663E\u793A\u672C\u5730\u6A21\u578B`;
-    copy.createDiv({
-      cls: `ccswitch-model-status${modelState.status === "error" ? " is-error" : ""}`,
-      text: statusText,
-      attr: modelState.endpoint ? { title: modelState.endpoint } : {}
-    });
-    const controls = card.createDiv({ cls: "ccswitch-model-controls" });
-    const select = controls.createEl("select", {
-      cls: "dropdown ccswitch-model-dropdown",
-      attr: { "aria-label": "\u9009\u62E9\u603B\u7ED3\u6A21\u578B" }
-    });
-    select.createEl("option", {
-      value: "",
-      text: provider.model ? `\u8DDF\u968F\u4F9B\u5E94\u5546\u9ED8\u8BA4 (${provider.model})` : "\u8DDF\u968F\u4F9B\u5E94\u5546\u9ED8\u8BA4"
-    });
-    const sourceModels = modelState.status === "loaded" ? modelState.models : fallbackModels;
-    const options = [
-      ...new Set([...sourceModels, provider.model ?? "", settings.model].filter(Boolean))
-    ].sort((a, b) => a.localeCompare(b, "en", { numeric: true, sensitivity: "base" }));
-    for (const model of options) {
-      select.createEl("option", { value: model, text: model });
+  renderCustom(parent, settings) {
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-custom-toolbar").setName("\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546").setDesc("\u5BC6\u94A5\u4EC5\u4EE5\u63A9\u7801\u663E\u793A").addButton(
+      (b) => b.setButtonText("\u6DFB\u52A0").onClick(() => this.openEditor(null))
+    );
+    if (!settings.customProviders.length) {
+      parent.createEl("p", {
+        cls: "video-memo-provider-empty",
+        text: "\u5C1A\u672A\u6DFB\u52A0\u4F9B\u5E94\u5546\u3002"
+      });
+      return;
     }
-    select.value = settings.model;
-    select.addEventListener("change", () => {
-      void this.options.updateSettings({ model: select.value });
-    });
-    const refresh = controls.createEl("button", {
-      cls: `clickable-icon ccswitch-model-refresh${modelState.status === "loading" ? " is-loading" : ""}`,
-      attr: { type: "button", "aria-label": "\u5B9E\u65F6\u5237\u65B0\u6A21\u578B\u5217\u8868" }
-    });
-    (0, import_obsidian3.setIcon)(refresh, "refresh-cw");
-    refresh.disabled = modelState.status === "loading";
-    refresh.addEventListener("click", () => this.startProviderModelRequest(provider, true));
+    for (const provider of settings.customProviders) {
+      const active = provider.id === settings.activeCustomProviderId;
+      new import_obsidian3.Setting(parent).setClass("video-memo-provider-custom-row").setName(`${active ? "\u5F53\u524D \xB7 " : ""}${provider.name || "\u672A\u547D\u540D"}`).setDesc(
+        `${provider.model || "\u672A\u9009\u6A21\u578B"} \xB7 ${displayBaseUrl(provider.baseUrl)} \xB7 ${maskedKey(provider.apiKey)}`
+      ).addButton(
+        (b) => b.setButtonText(active ? "\u5DF2\u9009\u62E9" : "\u9009\u62E9").setDisabled(active).onClick(async () => {
+          await this.options.updateSettings({
+            activeCustomProviderId: provider.id
+          });
+          this.options.rerender();
+        })
+      ).addExtraButton(
+        (b) => b.setIcon("pencil").setTooltip("\u7F16\u8F91").onClick(() => this.openEditor(provider))
+      ).addExtraButton(
+        (b) => b.setIcon("trash").setTooltip("\u5220\u9664").onClick(async () => {
+          const list = settings.customProviders.filter(
+            (x) => x.id !== provider.id
+          );
+          await this.options.updateSettings({
+            customProviders: list,
+            activeCustomProviderId: list[0]?.id || ""
+          });
+          this.options.rerender();
+        })
+      );
+    }
   }
-  providerModelKey(provider) {
-    return `${provider.appType}:${provider.id}`;
-  }
-  ensureProviderModels(provider) {
-    const existing = this.providerModelStates.get(this.providerModelKey(provider));
-    return existing ?? this.startProviderModelRequest(provider, false);
-  }
-  startProviderModelRequest(provider, rerender) {
-    const key = this.providerModelKey(provider);
-    const requestId = ++this.modelRequestId;
-    const state = {
-      requestId,
-      status: "loading",
-      models: [],
-      endpoint: "",
-      error: "",
-      probeStatus: "idle",
-      probeError: ""
-    };
-    this.providerModelStates.set(key, state);
-    if (rerender) this.options.rerender();
-    void fetchCcSwitchProviderModels({
-      dbPath: this.options.getSettings().ccSwitchDbPath,
-      appType: provider.appType,
-      providerId: provider.id
-    }).then((response) => {
-      if (this.providerModelStates.get(key)?.requestId !== requestId) return;
-      this.providerModelStates.set(key, {
-        requestId,
-        status: "loaded",
-        models: response.models,
-        endpoint: response.endpoint,
-        error: "",
-        probeStatus: "idle",
-        probeError: ""
+  openEditor(provider) {
+    new ProviderEditorModal(this.options.app, provider, async (value) => {
+      const settings = this.options.getSettings();
+      const exists = settings.customProviders.some((x) => x.id === value.id);
+      const customProviders = exists ? settings.customProviders.map((x) => x.id === value.id ? value : x) : [...settings.customProviders, value];
+      await this.options.updateSettings({
+        customProviders,
+        activeCustomProviderId: settings.activeCustomProviderId || value.id
       });
       this.options.rerender();
-    }).catch((error) => {
-      if (this.providerModelStates.get(key)?.requestId !== requestId) return;
-      this.providerModelStates.set(key, {
-        requestId,
-        status: "error",
-        models: [],
-        endpoint: provider.baseUrl ?? "",
-        error: error instanceof Error ? error.message : String(error),
-        probeStatus: "idle",
-        probeError: ""
-      });
-      this.options.rerender();
-    });
-    return state;
+    }).open();
   }
-  renderConfigTab(parent, label, value) {
-    const button = parent.createEl("button", {
-      cls: `ccswitch-config-tab${this.configTab === value ? " is-active" : ""}`,
-      text: label,
-      attr: { type: "button" }
+  renderCcSwitch(parent, settings) {
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-database").setName("\u6570\u636E\u5E93\u6587\u4EF6").setDesc("\u7559\u7A7A\u4F7F\u7528 ~/.cc-switch/cc-switch.db").addText(
+      (x) => x.setPlaceholder("\u9ED8\u8BA4\u8DEF\u5F84").setValue(settings.ccSwitchDbPath).onChange(async (v) => {
+        await this.options.updateSettings({ ccSwitchDbPath: v.trim() });
+      })
+    );
+    let providers;
+    try {
+      providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
+    } catch {
+      parent.createEl("p", {
+        cls: "video-memo-provider-error",
+        text: "\u65E0\u6CD5\u8BFB\u53D6\u6570\u636E\u5E93\u3002\u8BF7\u68C0\u67E5\u8DEF\u5F84\u6216 Obsidian \u7248\u672C\u3002"
+      });
+      return;
+    }
+    const appTypes = [...new Set(providers.map((x) => x.appType))];
+    const appType = appTypes.includes(settings.ccSwitchAppType) ? settings.ccSwitchAppType : appTypes[0] || settings.ccSwitchAppType;
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-app-type").setName("\u5E94\u7528\u7C7B\u578B").addDropdown((d) => {
+      for (const v of appTypes) d.addOption(v, v);
+      d.setValue(appType).onChange(async (v) => {
+        await this.options.updateSettings({
+          ccSwitchAppType: v,
+          ccSwitchProviderId: "",
+          model: ""
+        });
+        this.options.rerender();
+      });
     });
-    button.addEventListener("click", () => {
-      this.configTab = value;
-      this.options.rerender();
-    });
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-follow-current").setName("\u8DDF\u968F\u5168\u5C40\u5F53\u524D").addToggle(
+      (t) => t.setValue(settings.ccSwitchFollowCurrent).onChange(async (v) => {
+        await this.options.updateSettings({ ccSwitchFollowCurrent: v });
+        this.options.rerender();
+      })
+    );
+    const list = providers.filter((x) => x.appType === appType);
+    if (!settings.ccSwitchFollowCurrent)
+      new import_obsidian3.Setting(parent).setClass("video-memo-provider-fixed-selection").setName("\u56FA\u5B9A\u4F9B\u5E94\u5546").addDropdown((d) => {
+        d.addOption("", "\u8BF7\u9009\u62E9");
+        for (const p of list) d.addOption(p.id, p.name);
+        d.setValue(settings.ccSwitchProviderId).onChange(async (v) => {
+          await this.options.updateSettings({
+            ccSwitchProviderId: v,
+            model: ""
+          });
+          this.options.rerender();
+        });
+      });
+    const selected = settings.ccSwitchFollowCurrent ? list.find((x) => x.isCurrent) : list.find((x) => x.id === settings.ccSwitchProviderId);
+    if (!selected) {
+      parent.createEl("p", {
+        cls: "video-memo-provider-empty",
+        text: "\u5F53\u524D\u6761\u4EF6\u4E0B\u6CA1\u6709\u53EF\u7528\u4F9B\u5E94\u5546\u3002"
+      });
+      return;
+    }
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-summary").setName(selected.name).setDesc(
+      `${displayBaseUrl(selected.baseUrl || "")} \xB7 ${selected.model || "\u9ED8\u8BA4\u6A21\u578B"} \xB7 API Key ${selected.usable ? "\u5DF2\u914D\u7F6E" : "\u7F3A\u5931"}`
+    );
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-model").setName("\u6A21\u578B\u8986\u76D6\uFF08\u53EF\u9009\uFF09").addText(
+      (x) => x.setValue(settings.model).setPlaceholder(selected.model || "\u4F7F\u7528\u4F9B\u5E94\u5546\u9ED8\u8BA4\u6A21\u578B").onChange(async (v) => {
+        await this.options.updateSettings({ model: v.trim() });
+      })
+    ).addButton(
+      (b) => b.setButtonText("\u53D1\u73B0\u6A21\u578B").onClick(async () => {
+        b.setDisabled(true);
+        try {
+          const runtime = await Promise.resolve().then(() => (init_ccswitch(), ccswitch_exports));
+          const r = await runtime.fetchCcSwitchProviderModels({
+            dbPath: settings.ccSwitchDbPath,
+            appType,
+            providerId: selected.id
+          });
+          if (r.models.length)
+            new ModelPickerModal(
+              this.options.app,
+              r.models,
+              async (model) => {
+                await this.options.updateSettings({ model });
+                this.options.rerender();
+              }
+            ).open();
+          else new import_obsidian3.Notice("\u670D\u52A1\u672A\u8FD4\u56DE\u6A21\u578B\u5217\u8868");
+        } catch {
+          new import_obsidian3.Notice("\u6A21\u578B\u53D1\u73B0\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u914D\u7F6E");
+        } finally {
+          b.setDisabled(false);
+        }
+      })
+    );
+  }
+};
+var ModelPickerModal = class extends import_obsidian3.Modal {
+  constructor(app, models, choose) {
+    super(app);
+    this.models = models;
+    this.choose = choose;
+  }
+  models;
+  choose;
+  onOpen() {
+    this.contentEl.addClass("video-memo-provider-model-picker");
+    this.contentEl.createEl("h2", { text: "\u9009\u62E9\u6A21\u578B" });
+    for (const model of this.models)
+      new import_obsidian3.Setting(this.contentEl).setName(model).addButton(
+        (b) => b.setButtonText("\u9009\u62E9").onClick(async () => {
+          await this.choose(model);
+          this.close();
+        })
+      );
+  }
+  onClose() {
+    this.contentEl.empty();
   }
 };
 
@@ -2451,13 +1851,16 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
   }
   display() {
     const { containerEl } = this;
-    containerEl.addClass("video-memo-settings-tab");
     containerEl.empty();
+    containerEl.removeClass("video-memo-settings-tab");
+    containerEl.addClass("video-memo-settings-host");
+    containerEl.addClass("video-memo-settings-active");
+    const settingsEl = containerEl.createDiv({ cls: "video-memo-settings-tab" });
     if (this.page === "providers") {
-      this.providerView.render(containerEl);
+      this.providerView.render(settingsEl);
       return;
     }
-    const intro = containerEl.createDiv({ cls: "video-memo-settings-intro" });
+    const intro = settingsEl.createDiv({ cls: "video-memo-settings-intro" });
     const introMark = intro.createDiv({ cls: "video-memo-settings-mark" });
     (0, import_obsidian4.setIcon)(introMark, "video");
     const introCopy = intro.createDiv({ cls: "video-memo-settings-intro-copy" });
@@ -2467,7 +1870,7 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
       this.providerView.showProviderList();
       this.display();
     };
-    const providerSetting = new import_obsidian4.Setting(containerEl).setName("\u4F9B\u5E94\u5546").setDesc(describeProviderSelection(this.plugin.settings)).addExtraButton(
+    const providerSetting = new import_obsidian4.Setting(settingsEl).setName("\u4F9B\u5E94\u5546").setDesc(describeProviderSelection(this.plugin.settings)).addExtraButton(
       (button) => button.setIcon("chevron-right").setTooltip("\u6253\u5F00\u4F9B\u5E94\u5546\u8BBE\u7F6E").onClick(openProviders)
     );
     providerSetting.settingEl.addClass("video-memo-navigation-setting");
@@ -2482,11 +1885,11 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
       event.preventDefault();
       openProviders();
     });
-    containerEl.createDiv({
+    settingsEl.createDiv({
       cls: "video-memo-settings-section-label",
       text: "\u8FD0\u884C\u73AF\u5883"
     });
-    new import_obsidian4.Setting(containerEl).setName("\u9879\u76EE\u76EE\u5F55").setDesc("\u5305\u542B src/pipeline.py \u7684 VideoMemo \u76EE\u5F55").addText(
+    new import_obsidian4.Setting(settingsEl).setName("\u9879\u76EE\u76EE\u5F55").setDesc("\u5305\u542B src/pipeline.py \u7684 VideoMemo \u76EE\u5F55").addText(
       (text) => text.setPlaceholder("D:\\AIApp\\video-memo").setValue(this.plugin.settings.projectPath).onChange(async (value) => {
         this.plugin.settings.projectPath = value.trim();
         await this.persist();
@@ -2495,20 +1898,20 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
     );
     const projectPath = this.plugin.settings.projectPath.trim();
     const pythonPath = projectPath ? this.plugin.resolvePython(projectPath) : "";
-    new import_obsidian4.Setting(containerEl).setName("Python \u8DEF\u5F84").setDesc("\u81EA\u52A8\u68C0\u6D4B\u9879\u76EE .venv\uFF0C\u672A\u627E\u5230\u65F6\u4F7F\u7528\u7CFB\u7EDF PATH \u4E2D\u7684 python").addText((text) => {
+    new import_obsidian4.Setting(settingsEl).setName("Python \u8DEF\u5F84").setDesc("\u81EA\u52A8\u68C0\u6D4B\u9879\u76EE .venv\uFF0C\u672A\u627E\u5230\u65F6\u4F7F\u7528\u7CFB\u7EDF PATH \u4E2D\u7684 python").addText((text) => {
       text.setPlaceholder("\u586B\u5199\u9879\u76EE\u76EE\u5F55\u540E\u81EA\u52A8\u8BC6\u522B").setValue(pythonPath).inputEl.disabled = true;
     });
-    containerEl.createDiv({
+    settingsEl.createDiv({
       cls: "video-memo-settings-section-label",
       text: "\u8F93\u51FA"
     });
-    new import_obsidian4.Setting(containerEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939\uFF08\u53EF\u9009\uFF09").setDesc("\u7559\u7A7A\uFF1A\u6309\u89C6\u9891\u5185\u5BB9\u81EA\u52A8\u521B\u5EFA\u4E3B\u9898\u6587\u4EF6\u5939\uFF08\u5982 Git/\uFF09\uFF1B\u586B\u5199\uFF1A\u56FA\u5B9A\u653E\u5230 Vault \u5185\u8BE5\u76F8\u5BF9\u8DEF\u5F84\uFF08\u4E0D\u5141\u8BB8\u7EDD\u5BF9\u8DEF\u5F84\u6216 .. \u7247\u6BB5\uFF09").addText(
+    new import_obsidian4.Setting(settingsEl).setName("Vault \u76EE\u6807\u6587\u4EF6\u5939\uFF08\u53EF\u9009\uFF09").setDesc("\u7559\u7A7A\uFF1A\u6309\u89C6\u9891\u5185\u5BB9\u81EA\u52A8\u521B\u5EFA\u4E3B\u9898\u6587\u4EF6\u5939\uFF08\u5982 Git/\uFF09\uFF1B\u586B\u5199\uFF1A\u56FA\u5B9A\u653E\u5230 Vault \u5185\u8BE5\u76F8\u5BF9\u8DEF\u5F84\uFF08\u4E0D\u5141\u8BB8\u7EDD\u5BF9\u8DEF\u5F84\u6216 .. \u7247\u6BB5\uFF09").addText(
       (text) => text.setPlaceholder("\u7559\u7A7A = \u81EA\u52A8\u6309\u4E3B\u9898\u5F52\u7C7B").setValue(this.plugin.settings.targetFolder).onChange(async (value) => {
         this.plugin.settings.targetFolder = sanitizeTargetFolder(value);
         await this.persist();
       })
     );
-    new import_obsidian4.Setting(containerEl).setName("\u5B8C\u6210\u540E\u6E05\u7406\u5A92\u4F53").setDesc("\u5220\u9664\u8F93\u51FA\u76EE\u5F55\u4E2D\u7684\u4E0B\u8F7D\u5A92\u4F53\u548C\u97F3\u8F68\uFF0C\u4E0D\u5220\u9664\u672C\u5730\u8F93\u5165\u6587\u4EF6").addToggle(
+    new import_obsidian4.Setting(settingsEl).setName("\u5B8C\u6210\u540E\u6E05\u7406\u5A92\u4F53").setDesc("\u5220\u9664\u8F93\u51FA\u76EE\u5F55\u4E2D\u7684\u4E0B\u8F7D\u5A92\u4F53\u548C\u97F3\u8F68\uFF0C\u4E0D\u5220\u9664\u672C\u5730\u8F93\u5165\u6587\u4EF6").addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.cleanupMedia).onChange(async (value) => {
         this.plugin.settings.cleanupMedia = value;
         await this.persist();
@@ -2592,15 +1995,15 @@ var TextPromptModal = class extends import_obsidian5.Modal {
         cls: "video-memo-badge-row"
       });
       if (this.providerBadge) {
-        const badge2 = badgeRow.createDiv({
+        const badge = badgeRow.createDiv({
           cls: "video-memo-provider-badge",
           attr: { "aria-label": "\u5F53\u524D\u4EFB\u52A1\u4F7F\u7528\u7684\u4F9B\u5E94\u5546" }
         });
-        const badgeIcon = badge2.createSpan({
+        const badgeIcon = badge.createSpan({
           cls: "video-memo-provider-badge-icon"
         });
         (0, import_obsidian5.setIcon)(badgeIcon, "server");
-        badge2.createSpan({
+        badge.createSpan({
           cls: "video-memo-provider-badge-text",
           text: this.providerBadge
         });
@@ -2650,7 +2053,7 @@ var TextPromptModal = class extends import_obsidian5.Modal {
         cls: "video-memo-mode-switch",
         attr: { "aria-label": "\u8F93\u5165\u7C7B\u578B" }
       });
-      const createModeButton = (label, icon2, mode) => {
+      const createModeButton = (label, icon, mode) => {
         const button = modeSwitch.createEl("button", {
           cls: "video-memo-mode-button",
           attr: { type: "button" }
@@ -2658,7 +2061,7 @@ var TextPromptModal = class extends import_obsidian5.Modal {
         const iconElement = button.createSpan({
           cls: "video-memo-mode-icon"
         });
-        (0, import_obsidian5.setIcon)(iconElement, icon2);
+        (0, import_obsidian5.setIcon)(iconElement, icon);
         button.createSpan({ text: label });
         button.addEventListener("click", () => setSourceMode(mode));
         return button;

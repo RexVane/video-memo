@@ -245,6 +245,7 @@ def plan_migration(
 
 def apply_plan(plan: NotePlan, vault: Path) -> None:
     """Execute one planned move: content, embeds, attachments, marker."""
+    vault = vault.expanduser().resolve()
     content = plan.source.read_text(encoding="utf-8", errors="replace")
     legacy_prefix = f"![[{(plan.source.parent / 'assets' / plan.source_id).relative_to(vault).as_posix()}/"
     new_prefix = f"![[{(plan.target.parent / 'assets' / plan.source_id).relative_to(vault).as_posix()}/"

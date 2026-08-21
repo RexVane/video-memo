@@ -11,10 +11,9 @@ VideoMemo has two cooperating products:
    current Vault and provider settings, launches the Python engine with
    `shell: false`, streams progress, and opens the generated note.
 
-The Python engine is Apache-2.0. The plugin directory is a separate
-AGPL-3.0-or-later component because its provider settings workflow includes
-adaptations from CLI-Manager. See the root `NOTICE`, plugin `NOTICE`, and
-`THIRD-PARTY-NOTICES.md`.
+The Python engine and Obsidian plugin are MIT-licensed as one VideoMemo source
+project. Third-party dependencies retain their respective licenses; see the
+root `NOTICE`, plugin `NOTICE`, and `THIRD-PARTY-NOTICES.md`.
 
 ## Processing flow
 

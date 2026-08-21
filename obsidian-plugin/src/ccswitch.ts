@@ -1,32 +1,15 @@
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
+
 import { requestUrl } from "obsidian";
 import { parse as parseToml } from "smol-toml";
 
 type JsonRecord = Record<string, unknown>;
 
-const SECRET_MARKERS = ["token", "key", "secret", "auth", "password"];
-const SECRET_ASSIGNMENT =
-  /((?:"?[\w.-]*(?:token|key|secret|auth|password)[\w.-]*"?\s*[:=]\s*))(?:(?:"(?:\\.|[^"])*")|(?:'(?:\\.|[^'])*')|(?:[^,\s}\r\n#]+))/gi;
-const BEARER_SECRET = /(bearer\s+)[A-Za-z0-9._~+/=-]+/gi;
-const BASE_URL_KEYS = [
-  "OPENAI_BASE_URL",
-  "OPENAI_API_BASE",
-  "CODEX_BASE_URL",
-  "BASE_URL",
-  "API_BASE",
-  "ENDPOINT",
-  "URL",
-];
-const SECRET_KEYS = [
-  "OPENAI_API_KEY",
-  "OPENAI_AUTH_TOKEN",
-  "CODEX_API_KEY",
-  "CODEX_AUTH_TOKEN",
-  "API_KEY",
-  "AUTH_TOKEN",
-];
+const BASE_URL_KEYS = new Set(["baseurl", "apiurl", "endpoint"]);
+const MODEL_KEYS = new Set(["model", "defaultmodel"]);
+const FORMAT_KEYS = new Set(["apiformat", "wireapi", "protocol"]);
 
 export interface CcSwitchProvider {
   id: string;
@@ -68,7 +51,8 @@ export interface OpenAiCompatibleModelsResponse {
   models: string[];
 }
 
-export interface CcSwitchModelListResponse extends OpenAiCompatibleModelsResponse {}
+export interface CcSwitchModelListResponse
+  extends OpenAiCompatibleModelsResponse {}
 
 export interface OpenAiCompatibleModelsOptions {
   baseUrl: string;
@@ -76,19 +60,10 @@ export interface OpenAiCompatibleModelsOptions {
   apiFormat?: OpenAiApiFormat;
 }
 
-export type OpenAiApiFormat = "anthropic_messages" | "chat_completions" | "responses";
-
-export function normalizeApiFormat(value: unknown): OpenAiApiFormat {
-  if (typeof value !== "string") return "chat_completions";
-  const normalized = value.trim().toLowerCase().replace("-", "_");
-  if (normalized === "anthropic_messages" || normalized === "anthropic" || normalized === "messages") {
-    return "anthropic_messages";
-  }
-  if (normalized === "responses" || normalized === "response" || normalized === "openai_responses") {
-    return "responses";
-  }
-  return "chat_completions";
-}
+export type OpenAiApiFormat =
+  | "anthropic_messages"
+  | "chat_completions"
+  | "responses";
 
 export interface OpenAiModelProbeOptions {
   baseUrl: string;
@@ -102,28 +77,12 @@ export interface OpenAiModelProbeResult {
   model: string;
 }
 
-interface ProviderRow extends Record<string, unknown> {
-  id: string;
-  app_type: string;
-  name: string;
-  settings_config: string;
-  website_url: string | null;
-  category: string | null;
-  notes: string | null;
-  sort_index: number | null;
-  created_at: number | null;
-  is_current: number;
-  meta: string;
-  provider_type: string | null;
-}
-
-interface ParsedProviderConfig {
-  baseUrl: string | null;
-  model: string | null;
-  apiFormat: string | null;
-  apiKey: string | null;
+interface ExtractedProviderConfig {
+  baseUrl: string;
+  model: string;
+  apiFormat: OpenAiApiFormat;
+  apiKey: string;
   maskedEnv: Record<string, string>;
-  redactedSettingsConfig: string;
   parseError: boolean;
 }
 
@@ -133,211 +92,255 @@ function asRecord(value: unknown): JsonRecord | null {
     : null;
 }
 
-function textValue(value: unknown): string | null {
-  if (typeof value === "string") return value.trim() || null;
-  if (typeof value === "number" || typeof value === "boolean") {
+function textValue(value: unknown): string {
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number" || typeof value === "bigint") {
     return String(value);
+  }
+  return "";
+}
+
+function numberValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "bigint") {
+    const converted = Number(value);
+    return Number.isSafeInteger(converted) ? converted : null;
   }
   return null;
 }
 
 function normalizeKey(value: string): string {
-  return value.trim().replaceAll("-", "_").toUpperCase();
+  return value.replaceAll("-", "").replaceAll("_", "").toLowerCase();
 }
 
-function findTextByKeyMatcher(
-  value: unknown,
-  matcher: (key: string) => boolean,
-): string | null {
-  const record = asRecord(value);
-  if (!record) return null;
-  for (const [key, candidate] of Object.entries(record)) {
-    if (matcher(key)) {
-      const text = textValue(candidate);
-      if (text) return text;
+function keyMatches(normalizedKey: string, acceptedKeys: ReadonlySet<string>): boolean {
+  if (acceptedKeys.has(normalizedKey)) return true;
+  if (acceptedKeys.has("baseurl") && normalizedKey.endsWith("baseurl")) {
+    return true;
+  }
+  return acceptedKeys.has("model") && normalizedKey.endsWith("model");
+}
+
+function findTextByKey(root: unknown, acceptedKeys: ReadonlySet<string>): string {
+  const record = asRecord(root);
+  if (!record) return "";
+  for (const [key, value] of Object.entries(record)) {
+    if (keyMatches(normalizeKey(key), acceptedKeys)) {
+      const candidate = textValue(value);
+      if (candidate) return candidate;
     }
   }
-  for (const candidate of Object.values(record)) {
-    const nested = findTextByKeyMatcher(candidate, matcher);
+  for (const value of Object.values(record)) {
+    const nested = findTextByKey(value, acceptedKeys);
     if (nested) return nested;
   }
-  return null;
+  return "";
 }
 
-function findTextByKeyPatterns(
-  value: unknown,
-  exact: readonly string[],
-  suffixes: readonly string[],
-): string | null {
-  const normalizedExact = exact.map(normalizeKey);
-  const exactMatch = findTextByKeyMatcher(value, (key) =>
-    normalizedExact.includes(normalizeKey(key)),
-  );
-  if (exactMatch) return exactMatch;
-  const normalizedSuffixes = suffixes.map(normalizeKey);
-  return findTextByKeyMatcher(value, (key) =>
-    normalizedSuffixes.some((suffix) => normalizeKey(key).endsWith(suffix)),
-  );
+function isSecretValueKey(key: string): boolean {
+  const normalized = normalizeKey(key);
+  if (normalized.endsWith("envkey")) return false;
+  return [
+    "apikey",
+    "authtoken",
+    "accesstoken",
+    "bearertoken",
+    "password",
+    "secret",
+    "token",
+  ].some((suffix) => normalized.endsWith(suffix));
 }
 
-function isSecretKey(key: string): boolean {
-  const lower = key.toLowerCase();
-  return SECRET_MARKERS.some((marker) => lower.includes(marker));
-}
-
-function maskSecret(value: string): string {
-  const characters = [...value];
-  if (characters.length <= 12) return "***";
-  return `${characters.slice(0, 4).join("")}...${characters.slice(-4).join("")}`;
-}
-
-function redactEmbeddedSecrets(value: string): string {
-  return value
-    .replace(SECRET_ASSIGNMENT, '$1"***"')
-    .replace(BEARER_SECRET, "$1***");
-}
-
-function collectMaskedEnv(config: JsonRecord): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const sectionName of ["env", "auth"]) {
-    const section = asRecord(config[sectionName]);
-    if (!section) continue;
-    for (const [key, value] of Object.entries(section)) {
-      const text = textValue(value) ?? JSON.stringify(value);
-      result[key] = isSecretKey(key) ? maskSecret(text) : text;
+function findSecretValue(root: unknown): string {
+  const record = asRecord(root);
+  if (!record) return "";
+  for (const [key, value] of Object.entries(record)) {
+    if (isSecretValueKey(key)) {
+      const candidate = textValue(value);
+      if (candidate) return candidate;
     }
   }
-  return result;
+  for (const value of Object.values(record)) {
+    const nested = findSecretValue(value);
+    if (nested) return nested;
+  }
+  return "";
 }
 
-function redactSecrets(value: unknown, parentKey = ""): unknown {
-  if (isSecretKey(parentKey)) {
-    const text = textValue(value);
-    return text ? maskSecret(text) : "***";
+function findEnvironmentSecret(root: unknown): string {
+  const record = asRecord(root);
+  if (!record) return "";
+  for (const [key, value] of Object.entries(record)) {
+    if (normalizeKey(key).endsWith("envkey")) {
+      const environmentName = textValue(value);
+      if (environmentName) {
+        const secret = process.env[environmentName]?.trim();
+        if (secret) return secret;
+      }
+    }
   }
-  if (Array.isArray(value)) {
-    return value.map((item) => redactSecrets(item));
+  for (const value of Object.values(record)) {
+    const nested = findEnvironmentSecret(value);
+    if (nested) return nested;
   }
-  if (typeof value === "string") {
-    return redactEmbeddedSecrets(value);
-  }
-  const record = asRecord(value);
-  if (!record) return value;
-  return Object.fromEntries(
-    Object.entries(record).map(([key, item]) => [key, redactSecrets(item, key)]),
-  );
+  return "";
 }
 
-function parseMeta(raw: string): JsonRecord {
+function parseJsonRecord(value: unknown): JsonRecord | null {
+  if (typeof value !== "string") return null;
   try {
-    return asRecord(JSON.parse(raw || "{}")) ?? {};
+    return asRecord(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function parseTomlRecord(value: string): JsonRecord {
+  if (!value.trim()) return {};
+  try {
+    return asRecord(parseToml(value)) ?? {};
   } catch {
     return {};
   }
 }
 
-function parseTomlConfig(raw: string): {
-  baseUrl: string | null;
-  model: string | null;
-  apiFormat: string | null;
+function selectedCodexProvider(toml: JsonRecord): JsonRecord | null {
+  const providers = asRecord(toml.model_providers);
+  if (!providers) return null;
+  const selectedName = textValue(toml.model_provider);
+  const selected = selectedName ? asRecord(providers[selectedName]) : null;
+  if (selected) return selected;
+  return (
+    Object.values(providers)
+      .map(asRecord)
+      .find((provider) => findTextByKey(provider, BASE_URL_KEYS)) ?? null
+  );
+}
+
+function selectedGrokModel(toml: JsonRecord): {
+  model: string;
+  config: JsonRecord | null;
 } {
-  if (!raw.trim()) return { baseUrl: null, model: null, apiFormat: null };
-  try {
-    const parsed = asRecord(parseToml(raw)) ?? {};
-    const selectedName = textValue(parsed.model_provider);
-    const providers = asRecord(parsed.model_providers);
-    let selectedProvider = selectedName && providers
-      ? asRecord(providers[selectedName])
-      : null;
-    if (!selectedProvider && providers) {
-      selectedProvider =
-        Object.values(providers)
-          .map(asRecord)
-          .find((provider) => textValue(provider?.base_url)) ?? null;
-    }
-    return {
-      baseUrl: textValue(selectedProvider?.base_url),
-      model: textValue(parsed.model),
-      apiFormat: textValue(selectedProvider?.wire_api),
-    };
-  } catch {
-    const model = raw.match(/^\s*model\s*=\s*["']([^"']+)["']/m)?.[1] ?? null;
-    const baseUrl = raw.match(/^\s*base_url\s*=\s*["']([^"']+)["']/m)?.[1] ?? null;
-    const apiFormat = raw.match(/^\s*wire_api\s*=\s*["']([^"']+)["']/m)?.[1] ?? null;
-    return { baseUrl, model, apiFormat };
-  }
-}
-
-function parseProviderConfig(settingsConfig: string, metaRaw: string): ParsedProviderConfig {
-  try {
-    const parsed = asRecord(JSON.parse(settingsConfig));
-    if (!parsed) throw new Error("provider settings must be an object");
-    const env = asRecord(parsed.env);
-    const auth = asRecord(parsed.auth);
-    const toml = parseTomlConfig(textValue(parsed.config) ?? "");
-    const baseUrl =
-      findTextByKeyPatterns(env, BASE_URL_KEYS, ["_BASE_URL", "_API_BASE", "_ENDPOINT"]) ??
-      findTextByKeyPatterns(
-        parsed,
-        ["openai_base_url", "chatgpt_base_url", "base_url", "api_base", "endpoint"],
-        ["_BASE_URL", "_API_BASE", "_ENDPOINT"],
-      ) ??
-      toml.baseUrl;
-    const model =
-      findTextByKeyPatterns(env, ["OPENAI_MODEL", "CODEX_MODEL", "MODEL"], ["_MODEL"]) ??
-      textValue(parsed.model) ??
-      toml.model;
-    const apiKey =
-      findTextByKeyPatterns(env, SECRET_KEYS, ["_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_TOKEN"]) ??
-      findTextByKeyPatterns(auth, SECRET_KEYS, ["_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_TOKEN"]) ??
-      findTextByKeyPatterns(parsed, SECRET_KEYS, ["_API_KEY", "_AUTH_TOKEN", "_ACCESS_TOKEN", "_TOKEN"]);
-    const meta = parseMeta(metaRaw);
-    const apiFormat = textValue(meta.apiFormat) ?? toml.apiFormat;
-    return {
-      baseUrl,
-      model,
-      apiFormat,
-      apiKey,
-      maskedEnv: collectMaskedEnv(parsed),
-      redactedSettingsConfig: JSON.stringify(redactSecrets(parsed), null, 2),
-      parseError: false,
-    };
-  } catch {
-    return {
-      baseUrl: null,
-      model: null,
-      apiFormat: null,
-      apiKey: null,
-      maskedEnv: {},
-      redactedSettingsConfig:
-        "配置解析失败。为避免泄露 API Key，原始配置已隐藏。",
-      parseError: true,
-    };
-  }
-}
-
-function providerFromRow(row: ProviderRow): CcSwitchProvider {
-  const parsed = parseProviderConfig(row.settings_config, row.meta);
-  const openAiCompatible = !parsed.apiFormat?.toLowerCase().includes("anthropic");
+  const models = asRecord(toml.models);
+  const modelName = textValue(models?.default);
+  const modelTable = asRecord(toml.model);
   return {
-    id: String(row.id),
-    appType: String(row.app_type),
-    name: String(row.name),
-    category: row.category ? String(row.category) : null,
-    websiteUrl: row.website_url ? String(row.website_url) : null,
-    notes: row.notes ? String(row.notes) : null,
-    sortIndex: row.sort_index === null ? null : Number(row.sort_index),
-    createdAt: row.created_at === null ? null : Number(row.created_at),
-    isCurrent: Boolean(Number(row.is_current)),
-    baseUrl: parsed.baseUrl,
-    model: parsed.model,
-    apiFormat: parsed.apiFormat,
-    maskedEnv: parsed.maskedEnv,
-    configParseError: parsed.parseError,
-    redactedSettingsConfig: parsed.redactedSettingsConfig,
-    providerType: row.provider_type ? String(row.provider_type) : null,
-    usable: Boolean(parsed.baseUrl && parsed.apiKey && openAiCompatible),
+    model: modelName,
+    config: modelName && modelTable ? asRecord(modelTable[modelName]) : null,
   };
+}
+
+function collectMaskedEnvironment(settings: JsonRecord): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const sectionName of ["env", "auth"] as const) {
+    const section = asRecord(settings[sectionName]);
+    if (!section) continue;
+    for (const [key, rawValue] of Object.entries(section)) {
+      const value = textValue(rawValue);
+      if (!value) continue;
+      result[key] = isSecretValueKey(key)
+        ? "******"
+        : normalizeKey(key).endsWith("baseurl")
+          ? sanitizeUrlForDisplay(value)
+          : value;
+    }
+  }
+  return result;
+}
+
+function extractProviderConfig(
+  settingsRaw: string,
+  metadataRaw: string,
+  appType: string,
+): ExtractedProviderConfig {
+  const settings = parseJsonRecord(settingsRaw);
+  const parsedSettings = settings ?? {};
+  const metadata = parseJsonRecord(metadataRaw) ?? {};
+  const toml = parseTomlRecord(textValue(parsedSettings.config));
+  const codexProvider = selectedCodexProvider(toml);
+  const grokModel = selectedGrokModel(toml);
+
+  const apiKeySources = [
+    parsedSettings,
+    codexProvider,
+    grokModel.config,
+    toml,
+  ];
+  const directApiKey = apiKeySources.map(findSecretValue).find(Boolean) ?? "";
+  const environmentApiKey =
+    apiKeySources.map(findEnvironmentSecret).find(Boolean) ?? "";
+  const apiKey = directApiKey || environmentApiKey;
+  const preferredConfigSources = [codexProvider, grokModel.config, parsedSettings];
+  const baseUrl =
+    [...preferredConfigSources, toml]
+      .map((value) => findTextByKey(value, BASE_URL_KEYS))
+      .find(Boolean) ?? "";
+  const model =
+    textValue(toml.model) ||
+    grokModel.model ||
+    findTextByKey(parsedSettings, MODEL_KEYS) ||
+    findTextByKey(codexProvider, MODEL_KEYS);
+  const apiFormat = normalizeApiFormat(
+    findTextByKey(metadata, FORMAT_KEYS) ||
+      findTextByKey(codexProvider, FORMAT_KEYS) ||
+      findTextByKey(grokModel.config, FORMAT_KEYS) ||
+      findTextByKey(parsedSettings, FORMAT_KEYS) ||
+      (appType.toLowerCase().startsWith("claude")
+        ? "anthropic_messages"
+        : "chat_completions"),
+  );
+
+  return {
+    apiKey,
+    baseUrl,
+    model,
+    apiFormat,
+    maskedEnv: collectMaskedEnvironment(parsedSettings),
+    parseError: Boolean(settingsRaw.trim() && !settings),
+  };
+}
+
+function safeConfigSummary(config: ExtractedProviderConfig): string {
+  return JSON.stringify({
+    baseUrl: sanitizeUrlForDisplay(config.baseUrl) || null,
+    model: config.model || null,
+    apiFormat: config.apiFormat,
+    environment: config.maskedEnv,
+    apiKeyConfigured: Boolean(config.apiKey),
+  });
+}
+
+function sanitizeUrlForDisplay(value: string): string {
+  try {
+    const url = new URL(value);
+    url.username = "";
+    url.password = "";
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return value ? "[configured URL]" : "";
+  }
+}
+
+function tryNormalizeBaseUrl(value: string): string {
+  try {
+    return normalizeOpenAiBaseUrl(value);
+  } catch {
+    return "";
+  }
+}
+
+export function normalizeApiFormat(value: unknown): OpenAiApiFormat {
+  if (typeof value !== "string") return "chat_completions";
+  const normalized = value.trim().toLowerCase().replaceAll("-", "_");
+  if (["anthropic", "anthropic_messages", "messages"].includes(normalized)) {
+    return "anthropic_messages";
+  }
+  if (["openai_responses", "response", "responses"].includes(normalized)) {
+    return "responses";
+  }
+  return "chat_completions";
 }
 
 export function defaultCcSwitchDbPath(): string {
@@ -357,7 +360,7 @@ function loadNodeSqlite(): typeof import("node:sqlite") {
     return require("node:sqlite") as typeof import("node:sqlite");
   } catch {
     throw new Error(
-      "当前 Obsidian 运行时不支持 node:sqlite。请升级 Obsidian，或切换到环境配置。",
+      "当前 Obsidian 运行时不支持 node:sqlite；请切换到自定义供应商或升级 Obsidian",
     );
   }
 }
@@ -371,7 +374,7 @@ function openDatabase(configuredPath: string): {
     throw new Error("cc-switch 数据库路径必须指向 .db 文件");
   }
   if (!existsSync(path)) {
-    throw new Error(`未找到 cc-switch 数据库: ${path}`);
+    throw new Error("未找到 cc-switch 数据库");
   }
   const { DatabaseSync } = loadNodeSqlite();
   return {
@@ -380,19 +383,54 @@ function openDatabase(configuredPath: string): {
   };
 }
 
-const PROVIDER_QUERY = `
-  SELECT id, app_type, name, settings_config, website_url, category, notes,
-         sort_index, created_at, is_current, meta, provider_type
-  FROM providers
-`;
-
-export function loadCcSwitchProviders(configuredPath = ""): CcSwitchProvidersResponse {
+export function loadCcSwitchProviders(
+  configuredPath = "",
+): CcSwitchProvidersResponse {
   const { db, path } = openDatabase(configuredPath);
   try {
-    const rows = db
-      .prepare(`${PROVIDER_QUERY} ORDER BY app_type, sort_index, name`)
-      .all() as unknown as ProviderRow[];
-    return { dbPath: path, providers: rows.map(providerFromRow) };
+    const rows = db.prepare("SELECT * FROM providers").all() as JsonRecord[];
+    const providers = rows.map((row): CcSwitchProvider => {
+      const appType = textValue(row.app_type);
+      const config = extractProviderConfig(
+        textValue(row.settings_config),
+        textValue(row.meta),
+        appType,
+      );
+      const baseUrl = tryNormalizeBaseUrl(config.baseUrl);
+      return {
+        id: textValue(row.id),
+        appType,
+        name: textValue(row.name) || textValue(row.id),
+        category: textValue(row.category) || null,
+        websiteUrl: sanitizeUrlForDisplay(textValue(row.website_url)) || null,
+        notes: textValue(row.notes) || null,
+        sortIndex: numberValue(row.sort_index),
+        createdAt: numberValue(row.created_at),
+        isCurrent: Number(row.is_current) === 1,
+        baseUrl: baseUrl || null,
+        model: config.model || null,
+        apiFormat: config.apiFormat,
+        maskedEnv: config.maskedEnv,
+        configParseError: config.parseError,
+        redactedSettingsConfig: safeConfigSummary(config),
+        providerType: textValue(row.provider_type) || null,
+        usable: Boolean(baseUrl && config.apiKey),
+      };
+    });
+    providers.sort((left, right) => {
+      const appTypeOrder = left.appType.localeCompare(right.appType, "en", {
+        sensitivity: "base",
+      });
+      if (appTypeOrder !== 0) return appTypeOrder;
+      const leftIndex = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
+      const rightIndex = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
+      if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+      return left.name.localeCompare(right.name, "zh-CN", {
+        numeric: true,
+        sensitivity: "base",
+      });
+    });
+    return { dbPath: path, providers };
   } finally {
     db.close();
   }
@@ -406,73 +444,78 @@ export function resolveCcSwitchProviderRuntime(options: {
 }): CcSwitchProviderRuntime {
   const { db } = openDatabase(options.dbPath ?? "");
   try {
+    const rows = db
+      .prepare("SELECT * FROM providers WHERE app_type = ?")
+      .all(options.appType) as JsonRecord[];
     const row = options.followCurrent
-      ? db
-          .prepare(`${PROVIDER_QUERY} WHERE app_type = ? AND is_current = 1 LIMIT 1`)
-          .get(options.appType)
-      : db
-          .prepare(`${PROVIDER_QUERY} WHERE app_type = ? AND id = ? LIMIT 1`)
-          .get(options.appType, options.providerId ?? "");
-    if (!row) {
-      throw new Error(
-        options.followCurrent
-          ? `cc-switch 未设置 ${options.appType} 的全局当前供应商`
-          : "固定的 cc-switch 供应商已不存在，请重新选择",
-      );
-    }
-    const providerRow = row as unknown as ProviderRow;
-    const parsed = parseProviderConfig(providerRow.settings_config, providerRow.meta);
-    if (!parsed.baseUrl) throw new Error("该供应商缺少 OpenAI 兼容 Base URL");
-    if (!parsed.apiKey) throw new Error("该供应商缺少 API Key 或 Token");
-    if (parsed.apiFormat?.toLowerCase().includes("anthropic")) {
-      throw new Error("该供应商使用 Anthropic 原生协议，不能用于当前总结引擎");
-    }
+      ? rows.find((item) => Number(item.is_current) === 1)
+      : rows.find((item) => textValue(item.id) === (options.providerId ?? ""));
+    if (!row) throw new Error("未找到所选供应商");
+
+    const appType = textValue(row.app_type);
+    const config = extractProviderConfig(
+      textValue(row.settings_config),
+      textValue(row.meta),
+      appType,
+    );
+    const baseUrl = normalizeOpenAiBaseUrl(config.baseUrl);
+    if (!config.apiKey) throw new Error("供应商缺少可用的 API Key");
     return {
-      id: String(providerRow.id),
-      appType: String(providerRow.app_type),
-      name: String(providerRow.name),
-      baseUrl: parsed.baseUrl,
-      model: parsed.model,
-      apiFormat: parsed.apiFormat,
-      apiKey: parsed.apiKey,
+      id: textValue(row.id),
+      appType,
+      name: textValue(row.name) || textValue(row.id),
+      baseUrl,
+      model: config.model || null,
+      apiFormat: config.apiFormat,
+      apiKey: config.apiKey,
     };
   } finally {
     db.close();
   }
 }
 
-export function normalizeOpenAiBaseUrl(baseUrl: string): string {
-  const url = new URL(baseUrl.trim());
-  if (!(["http:", "https:"] as string[]).includes(url.protocol)) {
-    throw new Error("模型接口 Base URL 必须使用 http 或 https");
+export function normalizeOpenAiBaseUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) throw new Error("供应商缺少 Base URL");
+  let url: URL;
+  try {
+    url = new URL(trimmed);
+  } catch {
+    throw new Error("供应商 Base URL 无效");
   }
-  if (url.username || url.password) {
-    throw new Error("模型接口 Base URL 不能包含用户名或密码");
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    throw new Error("供应商 Base URL 必须使用 HTTP 或 HTTPS");
   }
-  if (url.search || url.hash) {
-    throw new Error("模型接口 Base URL 不能包含查询参数或锚点");
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("供应商 Base URL 不能包含凭据、查询参数或锚点");
   }
-
   const path = url.pathname.replace(/\/+$/, "");
-  if (/\/(?:chat\/completions|responses|messages)$/i.test(path)) {
-    throw new Error("模型接口 Base URL 不能以 /chat/completions、/responses 或 /messages 结尾");
+  if (/\/(?:chat\/completions|responses|messages|models)$/i.test(path)) {
+    throw new Error("供应商 Base URL 应填写 API 根地址");
   }
   url.pathname = path || "/";
-  return url.toString();
+  return url.toString().replace(/\/$/, "");
+}
+
+function apiEndpoint(baseUrl: string, resource: string): string {
+  const base = normalizeOpenAiBaseUrl(baseUrl);
+  return /\/v1$/i.test(base) ? `${base}/${resource}` : `${base}/v1/${resource}`;
 }
 
 export function openAiModelsUrl(baseUrl: string): string {
-  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
-  const path = url.pathname.replace(/\/+$/, "");
-  if (!path) {
-    url.pathname = "/v1/models";
-  } else if (!/\/models$/i.test(path)) {
-    url.pathname = `${path}/models`;
-  }
-  return url.toString();
+  return apiEndpoint(baseUrl, "models");
 }
 
-function modelIdsFromResponse(payload: unknown): string[] {
+function authenticationHeaders(
+  apiKey: string,
+  apiFormat: OpenAiApiFormat,
+): Record<string, string> {
+  return apiFormat === "anthropic_messages"
+    ? { "x-api-key": apiKey, "anthropic-version": "2023-06-01" }
+    : { Authorization: `Bearer ${apiKey}` };
+}
+
+function modelIdsFromPayload(payload: unknown): string[] {
   const record = asRecord(payload);
   const candidates = Array.isArray(payload)
     ? payload
@@ -485,7 +528,9 @@ function modelIdsFromResponse(payload: unknown): string[] {
     .map((item) => {
       if (typeof item === "string") return item.trim();
       const model = asRecord(item);
-      return textValue(model?.id) ?? textValue(model?.name) ?? textValue(model?.model) ?? "";
+      return (
+        textValue(model?.id) || textValue(model?.name) || textValue(model?.model)
+      );
     })
     .filter((model) => model.length > 0 && model.length <= 200);
   return [...new Set(models)].sort((left, right) =>
@@ -493,71 +538,30 @@ function modelIdsFromResponse(payload: unknown): string[] {
   );
 }
 
-function responseErrorDetail(text: string): string {
-  try {
-    const payload = asRecord(JSON.parse(text));
-    const error = asRecord(payload?.error);
-    const detail = textValue(error?.message) ?? textValue(payload?.message);
-    return detail?.slice(0, 240) ?? "";
-  } catch {
-    return "";
-  }
+function requestError(): Error {
+  return new Error("供应商请求失败，请检查网络与配置");
 }
 
 export async function fetchOpenAiCompatibleModels(
   options: OpenAiCompatibleModelsOptions,
 ): Promise<OpenAiCompatibleModelsResponse> {
   const endpoint = openAiModelsUrl(options.baseUrl);
-  const isAnthropic = normalizeApiFormat(options.apiFormat) === "anthropic_messages";
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (isAnthropic) {
-    headers["x-api-key"] = options.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-  } else {
-    headers.Authorization = `Bearer ${options.apiKey}`;
-  }
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+  const apiFormat = normalizeApiFormat(options.apiFormat);
   try {
-    const response = await Promise.race([
-      requestUrl({
-        url: endpoint,
-        method: "GET",
-        headers,
-        throw: false,
-      }),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("模型接口请求超时（15 秒）")), 15_000);
-      }),
-    ]);
-    if (response.status < 200 || response.status >= 300) {
-      const label =
-        response.status === 401
-          ? "模型接口鉴权失败"
-          : response.status === 403
-            ? "模型接口请求被拒绝"
-            : response.status === 404
-              ? "未找到模型接口"
-              : "模型接口请求失败";
-      const detail = responseErrorDetail(response.text);
-      throw new Error(`${label} (HTTP ${response.status})${detail ? `：${detail}` : ""}`);
-    }
-
-    let payload: unknown;
-    try {
-      payload = JSON.parse(response.text);
-    } catch {
-      throw new Error("模型接口没有返回有效 JSON");
-    }
-    const models = modelIdsFromResponse(payload);
-    if (models.length === 0) {
-      throw new Error("模型接口返回成功，但列表为空");
-    }
+    const response = await requestUrl({
+      url: endpoint,
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...authenticationHeaders(options.apiKey, apiFormat),
+      },
+      throw: false,
+    });
+    if (response.status < 200 || response.status >= 300) throw requestError();
+    const models = modelIdsFromPayload(response.json);
     return { endpoint, models };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message.replaceAll(options.apiKey, "***"));
-  } finally {
-    if (timeout) clearTimeout(timeout);
+  } catch {
+    throw requestError();
   }
 }
 
@@ -567,92 +571,53 @@ export async function fetchCcSwitchProviderModels(options: {
   providerId: string;
 }): Promise<CcSwitchModelListResponse> {
   const runtime = resolveCcSwitchProviderRuntime({
-    dbPath: options.dbPath,
-    appType: options.appType,
+    ...options,
     followCurrent: false,
-    providerId: options.providerId,
   });
   return fetchOpenAiCompatibleModels({
     baseUrl: runtime.baseUrl,
     apiKey: runtime.apiKey,
+    apiFormat: normalizeApiFormat(runtime.apiFormat),
   });
-}
-
-function openAiEndpointUrl(baseUrl: string, suffix: string): string {
-  const url = new URL(normalizeOpenAiBaseUrl(baseUrl));
-  const path = url.pathname.replace(/\/+$/, "");
-  url.pathname = path ? `${path}/${suffix}` : `v1/${suffix}`;
-  return url.toString();
-}
-
-function httpStatusLabel(status: number): string {
-  if (status === 401) return "鉴权失败";
-  if (status === 403) return "请求被拒绝";
-  if (status === 404) return "模型或接口不存在";
-  if (status === 429) return "请求频率超限";
-  if (status >= 500) return "服务端不可用";
-  return "请求失败";
 }
 
 export async function probeOpenAiCompatibleModel(
   options: OpenAiModelProbeOptions,
 ): Promise<OpenAiModelProbeResult> {
-  const format = normalizeApiFormat(options.apiFormat);
-  const isAnthropic = format === "anthropic_messages";
-  const isResponses = format === "responses";
-  const endpoint = openAiEndpointUrl(
-    options.baseUrl,
-    isAnthropic ? "messages" : isResponses ? "responses" : "chat/completions",
-  );
-  const body = isAnthropic
-    ? {
-        model: options.model,
-        max_tokens: 8,
-        messages: [{ role: "user", content: "ping" }],
-      }
-    : isResponses
-      ? { model: options.model, input: "ping" }
-      : {
+  const endpoint =
+    options.apiFormat === "anthropic_messages"
+      ? apiEndpoint(options.baseUrl, "messages")
+      : options.apiFormat === "responses"
+        ? apiEndpoint(options.baseUrl, "responses")
+        : apiEndpoint(options.baseUrl, "chat/completions");
+  const body =
+    options.apiFormat === "anthropic_messages"
+      ? {
           model: options.model,
+          max_tokens: 1,
           messages: [{ role: "user", content: "ping" }],
-          max_tokens: 8,
-        };
-
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-    Accept: "application/json",
-  };
-  if (isAnthropic) {
-    headers["x-api-key"] = options.apiKey;
-    headers["anthropic-version"] = "2023-06-01";
-  } else {
-    headers.Authorization = `Bearer ${options.apiKey}`;
-  }
-
-  let timeout: ReturnType<typeof setTimeout> | undefined;
+        }
+      : options.apiFormat === "responses"
+        ? { model: options.model, input: "ping", max_output_tokens: 16 }
+        : {
+            model: options.model,
+            messages: [{ role: "user", content: "ping" }],
+            max_tokens: 1,
+          };
   try {
-    const response = await Promise.race([
-      requestUrl({
-        url: endpoint,
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        throw: false,
-      }),
-      new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error("模型请求超时（30 秒）")), 30_000);
-      }),
-    ]);
-    if (response.status < 200 || response.status >= 300) {
-      const detail = responseErrorDetail(response.text);
-      const label = httpStatusLabel(response.status);
-      throw new Error(`${label} (HTTP ${response.status})${detail ? `：${detail}` : ""}`);
-    }
+    const response = await requestUrl({
+      url: endpoint,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...authenticationHeaders(options.apiKey, options.apiFormat),
+      },
+      body: JSON.stringify(body),
+      throw: false,
+    });
+    if (response.status < 200 || response.status >= 300) throw requestError();
     return { endpoint, model: options.model };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(message.replaceAll(options.apiKey, "***"));
-  } finally {
-    if (timeout) clearTimeout(timeout);
+  } catch {
+    throw requestError();
   }
 }

@@ -1,42 +1,48 @@
 # VideoMemo
 
-VideoMemo 将视频链接、本地视频或录音转换成可检索的学习笔记，并可直接导出到 Obsidian。
-它由一个本地 Python 引擎和一个桌面 Obsidian 插件组成。
+[English](README.md) | [简体中文](README.zh-CN.md)
 
-## 能做什么
+VideoMemo turns a video link, local video, or audio recording into searchable learning notes. It combines a local Python engine with a desktop Obsidian plugin, and can write the final Markdown note and sampled frames directly into an Obsidian vault.
+
+## What It Does
 
 ```text
-视频链接 / 本地媒体
-    ↓
-字幕优先；没有字幕时使用本地 faster-whisper 转写
-    ↓
-视频可按时间均匀抽取画面采样帧（可用 --no-vision 跳过）
-    ↓
-OpenAI-compatible 多模态模型生成结构化学习笔记
-    ↓
-Markdown 报告 + 可选 Obsidian 笔记和画面采样帧附件
+Video URL or local media
+        |
+        v
+Platform subtitles first; local faster-whisper transcription as a fallback
+        |
+        v
+Optional evenly sampled video frames
+        |
+        v
+Structured notes from an OpenAI-compatible language/vision model
+        |
+        v
+Markdown report, with optional Obsidian note and frame attachments
 ```
 
-- 远程 URL：使用 `yt-dlp` 解析站点、格式、字幕和 Cookie；普通 HTTP 直链会尝试经过严格校验的 Range 多连接下载，失败自动回退到 `yt-dlp`。为防止恶意页面借此访问内网，快速下载默认拒绝私有、环回和链路本地地址；确需访问可信的本地媒体服务时可设置 `VIDEOMEMO_ALLOW_PRIVATE_URLS=1`。
-- 本地媒体：直接读取原文件，不复制、不删除原文件；视频默认仍可抽帧，音频自动跳过画面分析。
-- 字幕：优先使用平台手工字幕，其次自动字幕，最后回退到本地 Whisper。
-- 隐私：转写在本地完成；摘要请求会把转写和选定关键帧发送到你配置的模型服务。
+- Remote URLs are parsed with `yt-dlp`, including site formats, subtitles, and cookies. Eligible ordinary HTTP media may use a validated multi-connection Range download and transparently falls back to `yt-dlp` when needed.
+- Local media is read in place. The original file is never copied or deleted. Video can be sampled for visual analysis; audio skips frame extraction.
+- Subtitles are preferred in this order: platform-provided manual subtitles, automatic subtitles, then local Whisper transcription.
+- Transcription stays local. Summary requests send the transcript and selected key frames to the model service you configure.
+- Private, loopback, and link-local addresses are rejected by the fast downloader by default. Set `VIDEOMEMO_ALLOW_PRIVATE_URLS=1` only for a trusted local media server.
 
-## 支持环境
+## Requirements
 
-| 组件 | 要求 |
+| Component | Requirement |
 | --- | --- |
-| Python | 3.10–3.13；Python 3.10 自动使用 `tomli` 兼容 TOML |
-| ffmpeg | 必须安装并加入 PATH；项目不捆绑二进制 |
-| ffprobe | 推荐安装；缺失时仍可运行，但无法读取部分媒体时长 |
-| Windows GUI | Windows 10/11，推荐项目 `.venv` |
-| Obsidian 插件 | 桌面版 Obsidian，插件 `video-memo`；移动端不支持 |
-| Node.js | 仅从源码构建插件时需要 Node.js 18+ |
-| 模型 | 启用画面分析时需要支持图片输入的 OpenAI-compatible 模型；`--no-vision` 只需文本模型 |
+| Python | 3.10-3.13; Python 3.10 uses the `tomli` TOML compatibility package |
+| ffmpeg | Required and available on `PATH`; binaries are not bundled |
+| ffprobe | Recommended; some media durations cannot be read without it |
+| Windows GUI | Windows 10/11; a project `.venv` is recommended |
+| Obsidian plugin | Desktop Obsidian; mobile Obsidian is not supported |
+| Node.js | 18+ only when building the plugin from source |
+| Model | An image-capable OpenAI-compatible model when vision is enabled; `--no-vision` only requires a text model |
 
-## 安装 Python 引擎
+## Install the Python Engine
 
-从仓库根目录执行：
+From the repository root on Windows:
 
 ```powershell
 python -m venv .venv
@@ -45,118 +51,103 @@ python -m venv .venv
 Copy-Item .env.example .env
 ```
 
-也可以安装为命令行工具（仍需在可访问配置和媒体的工作目录运行）：
+The engine can also be installed as a command-line tool:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -e .
 videomemo --version
 ```
 
-首次使用 Whisper 时会下载模型到 `models/faster-whisper/`；该目录已被 Git 忽略。可用 `WHISPER_MODEL_DIR` 指定其他位置。通过已安装的 `videomemo` 命令运行时，默认数据根目录是当前工作目录；也可以用 `VIDEOMEMO_PROJECT_ROOT` 指定 `.env`、模型和输出所在目录。
+The first Whisper run downloads weights into `models/faster-whisper/`, which is ignored by Git. Set `WHISPER_MODEL_DIR` to use another location. For an installed `videomemo` command, the current working directory is the default data root; set `VIDEOMEMO_PROJECT_ROOT` to place `.env`, models, and output under another project root.
 
-## API 配置
+## API Configuration
 
-优先级从高到低：
+Configuration is resolved in this order, from highest to lowest priority:
 
-1. 桌面 GUI、Obsidian 插件或命令行显式传入；
-2. `.env` / 环境变量：`LLM_API_KEY`、`LLM_BASE_URL`、`LLM_MODEL`；
-3. 本机 `~/.grok/config.toml`；
-4. `XAI_API_KEY` 默认连接 xAI，`OPENAI_API_KEY` 默认连接 OpenAI。
+1. Values explicitly supplied by the GUI, the Obsidian plugin, or CLI options.
+2. `.env` or environment variables such as `LLM_API_KEY`, `LLM_BASE_URL`, and `LLM_MODEL`.
+3. The local `~/.grok/config.toml` profile.
+4. `XAI_API_KEY` (xAI default endpoint) or `OPENAI_API_KEY` (OpenAI default endpoint).
 
-兼容的 Base URL 变量包括 `OPENAI_BASE_URL`、`OPENAI_API_BASE`、`XAI_BASE_URL` 和
-`GROK_MODELS_BASE_URL`；兼容的 xAI key 包括 `GROK_API_KEY` 和
-`GROK_CODE_XAI_API_KEY`。程序实现允许 `http` 和 `https`，生产环境建议使用可信的 HTTPS；
-本地服务可使用 `http://localhost`。API key 不应写入日志、插件数据或 Git。
+Accepted base URL variables include `OPENAI_BASE_URL`, `OPENAI_API_BASE`, `XAI_BASE_URL`, and `GROK_MODELS_BASE_URL`. Accepted xAI key aliases include `GROK_API_KEY` and `GROK_CODE_XAI_API_KEY`. Base URLs may use `http` or `https`; use trusted HTTPS services in production and reserve `http://localhost` for a local service.
 
-`LLM_API_FORMAT` 支持三种协议：`chat_completions`（默认）、`responses`（OpenAI Responses
-API，也接受 `openai_responses`、`response`）、`anthropic_messages`（Anthropic Messages
-API，也接受 `anthropic`、`messages`）。Anthropic 模式使用 `x-api-key` 和
-`anthropic-version: 2023-06-01` 认证，请求发送到 `<base_url>/messages`；
-Chat/Responses 使用 `Authorization: Bearer`。`LLM_NOTES_MODEL` 可为长转写章节指定单独模型。
+`LLM_API_FORMAT` supports `chat_completions` (default), `responses` (also accepted as `openai_responses` or `response`), and `anthropic_messages` (also accepted as `anthropic` or `messages`). Anthropic requests use `x-api-key` and `anthropic-version: 2023-06-01` at `<base_url>/messages`; Chat Completions and Responses use Bearer authentication. `LLM_NOTES_MODEL` can select a separate model for long-transcript chapter notes. Never put an API key in logs, output files, or Git.
 
-## GUI
+See [.env.example](.env.example) for the non-secret variable template.
+
+## Desktop GUI
 
 ```powershell
 .\start_gui.cmd
-# 或
+# or
 .\.venv\Scripts\python.exe src/app_gui.py
 ```
 
-GUI 支持链接/本地文件、Whisper 精度、语言、Cookie、关键帧数量、API 配置、进度、取消、
-复制总结和打开输出目录。
+The GUI accepts a URL or local media path and exposes Whisper model/quality, language, browser cookies, frame count, model, API settings, optional Obsidian export, progress, cancellation, result-folder opening, and summary copying. A failed or cancelled run clears the previous-result state so stale output is not presented as the current result.
 
-## CLI
+## Command Line
 
 ```powershell
-# 远程视频
+# Remote video
 .\summarize.cmd "https://www.youtube.com/watch?v=xxxx"
 python src/pipeline.py "https://www.bilibili.com/video/BVxxxx"
 
-# 本地视频或录音
-.\summarize.cmd "D:\录像\课程.mp4"
-.\summarize.cmd "D:\录音\会议.m4a"
+# Local video or recording
+.\summarize.cmd "D:\Media\course.mp4"
+.\summarize.cmd "D:\Media\meeting.m4a"
 
-# 需要登录：优先匿名，匿名失败后读取浏览器 Cookie
+# Login-required sites: try anonymous access first, then browser cookies
 python src/pipeline.py "URL" --cookies-from-browser edge
 python src/pipeline.py "URL" --cookies "D:\secure\cookies.txt"
 
-# 重新生成：复用已有转写和关键帧，不重新下载
-python src/pipeline.py --regenerate "output\20260716_120000_课程"
+# Reuse a run's transcription and frames to regenerate its report
+python src/pipeline.py --regenerate "output\20260716_120000_course"
 
-# 导出 Obsidian
+# Export the report and frames to an Obsidian vault
 python src/pipeline.py "URL" --obsidian-vault "D:\Notes\My Vault"
 
-# 检查版本
+# Print the engine version
 python src/pipeline.py --version
 ```
 
-参数：
-
-| 参数 | 说明 |
+| Option | Description |
 | --- | --- |
-| `-o, --output DIR` | 输出根目录 |
-| `-m, --whisper-model` | `tiny` / `base` / `small` / `medium` / `large-v3` |
-| `-l, --language` | 语言代码，如 `zh`、`en`；默认自动检测 |
-| `--max-frames N` | 最多发送给视觉模型的关键帧数量 |
-| `--no-vision` | 跳过画面分析，不要求多模态模型 |
-| `--cleanup-media` | 成功后删除本次下载媒体和 `audio.wav` |
-| `--llm-model MODEL` | 模型名 |
-| `--api-base-url URL` | 临时覆盖 API Base URL |
-| `--cookies-from-browser BROWSER` | 从浏览器读取 Cookie |
-| `--cookies FILE` | 使用导出的 `cookies.txt` |
-| `--obsidian-vault DIR` | 导出报告和关键帧到 Vault |
-| `--obsidian-folder DIR` | Vault 内目标文件夹；留空则按 AI 生成的主题自动创建子目录（如 `Git/`） |
-| `--regenerate DIR` | 从已有运行目录重新生成报告 |
-| `--version` | 显示引擎版本 |
-| `--json-progress` | 插件内部使用的结构化进度输出 |
+| `-o, --output DIR` | Output root directory |
+| `-m, --whisper-model` | `tiny`, `base`, `small`, `medium`, or `large-v3` |
+| `-l, --language` | Speech language such as `zh` or `en`; automatic detection by default |
+| `--max-frames N` | Maximum number of key frames sent to the vision model |
+| `--no-vision` | Skip visual analysis and require only a text model |
+| `--cleanup-media` | Delete downloaded media and `audio.wav` after a successful run |
+| `--llm-model MODEL` | Model name |
+| `--api-base-url URL` | Temporarily override the API base URL |
+| `--cookies-from-browser BROWSER` | Read cookies from a supported browser |
+| `--cookies FILE` | Use an exported `cookies.txt` file |
+| `--obsidian-vault DIR` | Export the report and frames to a vault |
+| `--obsidian-folder DIR` | Vault-relative destination; empty means an AI-generated topic folder |
+| `--regenerate DIR` | Regenerate from an existing run directory |
+| `--version` | Print the engine version |
+| `--json-progress` | Emit structured progress events for the plugin |
 
-支持的视频扩展名：`.mp4`、`.mkv`、`.webm`、`.mov`、`.avi`、`.flv`、`.m4v`、`.ts`、
-`.mpg`、`.mpeg`、`.wmv`、`.3gp`、`.3g2`、`.f4v`、`.ogv`。
+Supported video extensions include `.mp4`, `.mkv`, `.webm`, `.mov`, `.avi`, `.flv`, `.m4v`, `.ts`, `.mpg`, `.mpeg`, `.wmv`, `.3gp`, `.3g2`, `.f4v`, and `.ogv`. Supported audio extensions include `.mp3`, `.wav`, `.m4a`, `.flac`, `.aac`, `.ogg`, `.opus`, `.wma`, `.amr`, `.aiff`, `.mka`, `.oga`, `.weba`, and `.mpga`.
 
-支持的音频扩展名：`.mp3`、`.wav`、`.m4a`、`.flac`、`.aac`、`.ogg`、`.opus`、`.wma`、
-`.amr`、`.aiff`、`.mka`、`.oga`、`.weba`、`.mpga`。
+## Output and Cache
 
-## 输出和缓存
+Each task is stored under `output/<timestamp>_<title>/` and normally contains:
 
-每个任务位于 `output/<时间戳>_<标题>/`，通常包含：
+- `summary.md`: a scan-friendly structured learning note;
+- `transcript.txt`: timestamped transcription;
+- `audio.wav`: intermediate audio used for ASR;
+- `frames/`: evenly sampled video frames when vision is enabled;
+- `source.*`: downloaded remote media (local input is never copied);
+- `info.json`: metadata, cache information, and completion state.
 
-- `summary.md`：扫描优先的结构化学习笔记；
-- `transcript.txt`：带时间戳的转写；
-- `audio.wav`：用于 ASR 的中间音轨；
-- `frames/`：启用视觉且输入含视频时按时间均匀抽取的画面采样帧；
-- `source.*`：远程下载的媒体；本地输入不会复制该文件；
-- `info.json`：元数据、缓存和完成状态。
+Compatible recent runs for the same source are reused. `--cleanup-media` removes only downloaded media and the generated audio from the current run, leaving the report, transcript, subtitles, and frames. Original local media is never removed. Failed, cancelled, or interrupted operations recover their run status and keep cache generations consistent; missing chapter requests remain marked in the report instead of being silently dropped.
 
-相同来源会复用兼容的最近任务。`--cleanup-media` 只删除本次运行目录中的下载媒体和音轨，
-保留报告、转写、字幕和关键帧；本地原始文件永远不会删除。
+## Obsidian Plugin
 
-## Obsidian 插件
+`obsidian-plugin/` contains the desktop-only `video-memo` plugin. It provides an input dialog, provider/model settings, live progress, cancellation, background runs, and automatic opening of the completed note. The plugin starts the Python engine with `shell: false`, so Python dependencies, `ffmpeg`, and `yt-dlp` must still be installed.
 
-`obsidian-plugin/` 是桌面端 `video-memo` 插件。它提供输入弹窗、供应商/模型设置、任务进度、
-取消、后台运行和完成后自动打开笔记。插件通过 `shell: false` 启动项目 Python 引擎，
-所以仍需准备 Python 项目依赖、ffmpeg 和 yt-dlp。
-
-手动构建/安装：
+Build and install it manually:
 
 ```powershell
 cd obsidian-plugin
@@ -166,81 +157,59 @@ npm.cmd run build
 .\install.ps1 -VaultPath "D:\Notes\My Vault"
 ```
 
-安装目录为：
+The installer places the built files under:
 
 ```text
 <your-vault>/.obsidian/plugins/video-memo/
 ```
 
-启用插件后，在设置中填写包含 `src/pipeline.py` 的项目目录；Python 路径会自动检测项目
-`.venv`，未找到时回退到 PATH 中的 `python`。安装脚本会复制 `main.js`、`manifest.json`、
-`styles.css`、`LICENSE`、`NOTICE` 和 `COPYRIGHT.md`；对应 TypeScript 源码与构建配置保留在本仓库。
+Enable the plugin and set the directory containing `src/pipeline.py` in its settings. Python is detected from that project's `.venv`, then falls back to `python` on `PATH`. The installer copies the built runtime files (`main.js`, `manifest.json`, and `styles.css`) together with `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; TypeScript source and build configuration remain in this repository.
 
-供应商支持两种来源：只读 cc-switch 数据库，以及手动添加的 OpenAI-compatible
-自定义供应商。自定义供应商支持添加多个，每个可填写名称、API 根地址、API key、协议格式
-和模型，随时切换当前使用的供应商。插件通过 `/models` 自动发现模型；“测试连接”会先获取
-模型列表，再向所选模型发送一次最小真实请求以验证模型可调用（消耗极少量 token）。
-Base URL 应填写 `https://example.com/v1` 这类 API 根地址，不要填写 `/chat/completions`、
-`/responses` 或 `/messages`。测试/刷新模型会把凭据发送到该供应商端点；生产环境应使用可信
-HTTPS，localhost 可使用 HTTP。
+Provider settings support a read-only cc-switch database and multiple editable OpenAI-compatible custom providers. Each custom provider has a name, API root URL, API key, protocol format, and model, with one active provider at a time. The plugin can discover models through `/models`; "Test connection" fetches the model list and sends a minimal real request to the selected model. Enter a root such as `https://example.com/v1`, not `/chat/completions`, `/responses`, or `/messages`.
 
-每个自定义供应商的 API key 均会明文保存在当前 Vault 的
-`.obsidian/plugins/video-memo/data.json`，不会加入命令行、任务日志或输出文件。不要提交或分享
-该文件，也不要把它同步到不受信任的设备。旧 Obsidian/Electron 不支持 `node:sqlite` 时仍可使用
-自定义供应商。
+Custom provider API keys are stored in plaintext in the current vault at `.obsidian/plugins/video-memo/data.json`. They are not put in command-line arguments, logs, or output files. Never commit, share, or sync this file to an untrusted device. The custom-provider workflow remains available on older Obsidian/Electron runtimes that lack `node:sqlite`.
 
-插件与 Python 引擎分层许可：Python 根项目 Apache-2.0；插件 AGPL-3.0-or-later。详见
-`LICENSE`、`NOTICE`、`obsidian-plugin/LICENSE`、`obsidian-plugin/COPYRIGHT.md` 和
-`THIRD-PARTY-NOTICES.md`。
+## Migrating Legacy Notes
 
-## 旧笔记迁移
-
-旧版本把笔记导出到 `<vault>/Video Memos/`，文件名带 `_<来源ID>` 后缀。需要按新规则
-（`<vault>/<主题>/<AI 标题>.md`）归档时，使用 `tools/migrate_obsidian_notes.py`：
+Older releases wrote notes to `<vault>/Video Memos/` with a `_<source-id>` filename suffix. To move them to the current `<vault>/<topic>/<AI title>.md` layout, use `tools/migrate_obsidian_notes.py`:
 
 ```powershell
-# 先看计划（dry-run），LLM 按笔记内容识别主题；也可 --no-llm 或 --topic "Git" 指定
-python tools/migrate_obsidian_notes.py --vault "D:\ProgramData\ObsidianData"
+# Preview the plan; use --no-llm or --topic "Git" to avoid classification
+python tools/migrate_obsidian_notes.py --vault "D:\Notes\My Vault"
 
-# 确认无误后执行
-python tools/migrate_obsidian_notes.py --vault "D:\ProgramData\ObsidianData" --apply
+# Apply after reviewing the plan
+python tools/migrate_obsidian_notes.py --vault "D:\Notes\My Vault" --apply
 ```
 
-脚本会把笔记和附件一起搬入主题文件夹、改写 `![[...]]` 嵌入、补写来源标记，并在 Vault 根目录
-或主题名冲突时自动加后缀，绝不覆盖已有文件；备份和无法识别的文件保留在 `Video Memos/` 并报告。
+The migration moves notes and attachments, rewrites `![[...]]` embeds, restores source markers, avoids overwriting existing files, and keeps backups or unclassified notes in the legacy folder.
 
-## 开发与发布
+## Development
 
 ```powershell
 python -m compileall -q src tests
 python -m unittest discover -s tests -v
+python -m ruff check src tests
 cd obsidian-plugin
 npm.cmd ci
 npm.cmd run check
 npm.cmd run build
 ```
 
-GitHub Actions 会验证 Python 3.10–3.13、插件类型检查和构建产物同步。插件 tag 发布流程会
-生成 `main.js`、`manifest.json`、`styles.css`、许可证文件和 SHA-256 校验文件；不会包含
-`.env`、模型、媒体、Vault 或依赖缓存。
+GitHub Actions tests Python 3.10-3.13, runs the Python test suite, type-checks the plugin, and verifies the generated bundle. Tag releases build the plugin bundle and a SHA-256 checksum; they do not include `.env`, models, media, vault data, or dependency caches.
 
-## 安全与贡献
+## Security and Contributions
 
-不要提交 API key、Cookie、自定义供应商 `data.json`、真实媒体、转写、Whisper 权重、输出目录
-或 Vault 内容。漏洞请按 `SECURITY.md` 私下报告；贡献流程见 `CONTRIBUTING.md`，行为准则见
-`CODE_OF_CONDUCT.md`。
+Do not commit API keys, cookies, custom-provider `data.json`, real media, transcripts, Whisper weights, output directories, or vault contents. Report vulnerabilities privately through [SECURITY.md](SECURITY.md). See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for community expectations.
 
-## 许可证
+## License
 
-- 根目录 Python 引擎、测试、脚本和文档：Apache-2.0；
-- `obsidian-plugin/`：AGPL-3.0-or-later；
-- 依赖和外部运行时：见 `THIRD-PARTY-NOTICES.md`。
+All VideoMemo source code, including the Python engine and `obsidian-plugin/`, is released under the [MIT License](LICENSE). Third-party dependencies and external resources remain under their respective licenses; see [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
-## 相关文档
+## Documentation
 
-- [架构说明](docs/architecture.md)
-- [变更记录](CHANGELOG.md)
-- [贡献指南](CONTRIBUTING.md)
-- [安全政策](SECURITY.md)
-- [第三方声明](THIRD-PARTY-NOTICES.md)
-- [历史设计计划](docs/archive/REDESIGN_PLAN.md)
+- [Architecture](docs/architecture.md)
+- [Changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security policy](SECURITY.md)
+- [Third-party notices](THIRD-PARTY-NOTICES.md)
+- [Archived design plan](docs/archive/REDESIGN_PLAN.md)
