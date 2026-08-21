@@ -425,6 +425,10 @@ class PipelineTests(unittest.TestCase):
             )
 
     def test_recovery_failure_does_not_hide_original_error(self) -> None:
+        class LegacyRuntimeError(RuntimeError):
+            def add_note(self, note: str) -> None:
+                raise AttributeError("add_note is unavailable")
+
         with tempfile.TemporaryDirectory() as tmp:
             work = Path(tmp)
             (work / "info.json").write_text(
@@ -437,7 +441,7 @@ class PipelineTests(unittest.TestCase):
                 work,
                 restore_complete=True,
             )
-            original = RuntimeError("LLM failed")
+            original = LegacyRuntimeError("LLM failed")
 
             with patch.object(
                 pipeline,

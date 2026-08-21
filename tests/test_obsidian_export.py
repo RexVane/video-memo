@@ -47,7 +47,7 @@ def _crash_before_note_commit(
 class ObsidianExportTests(unittest.TestCase):
     def test_exports_frontmatter_report_and_frames(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -84,7 +84,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_rejects_folder_outside_vault(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             summary = root / "summary.md"
             summary.write_text("summary", encoding="utf-8")
             vault = root / "vault"
@@ -104,7 +104,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_marks_local_audio_as_audio_learning_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             summary = root / "summary.md"
             summary.write_text("## 一眼看懂\n\nAudio notes", encoding="utf-8")
             vault = root / "vault"
@@ -129,7 +129,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_auto_topic_folder_from_content(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -165,7 +165,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_title_collision_never_clobbers_foreign_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             summary = root / "summary.md"
             summary.write_text("generated", encoding="utf-8")
             vault = root / "vault"
@@ -190,7 +190,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_title_change_updates_existing_note_for_same_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             summary = root / "summary.md"
             summary.write_text("first", encoding="utf-8")
             vault = root / "vault"
@@ -237,7 +237,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_failed_frame_copy_preserves_existing_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -290,7 +290,7 @@ class ObsidianExportTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -335,7 +335,7 @@ class ObsidianExportTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -400,7 +400,7 @@ class ObsidianExportTests(unittest.TestCase):
         self,
     ) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -456,7 +456,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_postcommit_cleanup_failure_does_not_invalidate_new_note(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -500,7 +500,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_export_without_new_frames_preserves_existing_attachments(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -533,7 +533,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_user_annotation_link_keeps_its_old_attachment_generation(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -554,7 +554,7 @@ class ObsidianExportTests(unittest.TestCase):
             )
             note = export_to_vault(summary, metadata, vault)
             old_frame = _linked_frame(note, vault)
-            old_link = old_frame.relative_to(vault).as_posix()
+            old_link = old_frame.relative_to(vault.resolve()).as_posix()
             note.write_text(
                 note.read_text(encoding="utf-8")
                 + f"\n## 我的截图批注\n![[{old_link}]]\n",
@@ -577,7 +577,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_legacy_fixed_attachment_path_is_kept_until_note_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             run_dir = root / "run"
             frames = run_dir / "frames"
             frames.mkdir(parents=True)
@@ -603,8 +603,8 @@ class ObsidianExportTests(unittest.TestCase):
             legacy_frame.write_bytes(versioned_frame.read_bytes())
             user_asset = asset_root / "keep.txt"
             user_asset.write_text("user-managed", encoding="utf-8")
-            versioned_relative = versioned_frame.relative_to(vault).as_posix()
-            legacy_relative = legacy_frame.relative_to(vault).as_posix()
+            versioned_relative = versioned_frame.relative_to(vault.resolve()).as_posix()
+            legacy_relative = legacy_frame.relative_to(vault.resolve()).as_posix()
             legacy_note = note.read_text(encoding="utf-8").replace(
                 versioned_relative,
                 legacy_relative,
@@ -645,7 +645,7 @@ class ObsidianExportTests(unittest.TestCase):
 
     def test_concurrent_exports_keep_note_and_attachments_from_same_commit(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
+            root = Path(tmp).resolve()
             vault = root / "vault"
             vault.mkdir()
             metadata = DownloadResult(

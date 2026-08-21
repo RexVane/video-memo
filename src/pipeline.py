@@ -436,10 +436,21 @@ def _restore_run_status_after_error(
         if recovery_error is None:
             recovery_error = caught
     if recovery_error is not None:
+        note = f"运行目录恢复失败: {recovery_error}"
         try:
-            error.add_note(f"运行目录恢复失败: {recovery_error}")
+            error.add_note(note)
         except AttributeError:
-            pass
+            # ``BaseException.add_note`` was added in Python 3.11. Keep the
+            # diagnostic available on supported Python 3.10 installations
+            # without replacing or masking the original pipeline exception.
+            try:
+                notes = getattr(error, "__notes__", None)
+                if not isinstance(notes, list):
+                    notes = []
+                    setattr(error, "__notes__", notes)
+                notes.append(note)
+            except (AttributeError, TypeError):
+                pass
 
 
 class _RunOperationLock:

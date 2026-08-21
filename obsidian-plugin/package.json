@@ -1,6 +1,6 @@
 {
   "name": "obsidian-video-memo",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Obsidian desktop plugin for the VideoMemo Python engine",
   "main": "main.js",

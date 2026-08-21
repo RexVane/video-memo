@@ -6,6 +6,11 @@
 
 后续修复和发布准备工作将在此记录。
 
+## [0.2.2] - 2026-08-21
+
+- 修复 Python 3.10 缺少 `BaseException.add_note()` 时恢复错误诊断被静默丢弃的问题。
+- 补齐 Windows 8.3 路径别名场景下的附件链接测试规范化，确保 Python 3.10–3.13 CI 一致通过。
+
 ## [0.2.1] - 2026-08-21
 
 - 新增完整的英文与简体中文双语 README，并保持安装、使用与安全说明同步。
@@ -36,7 +41,8 @@
 - 增加普通 HTTP 直链的校验型 Range 多连接下载，并在不适用时回退到 yt-dlp。
 - 统一项目品牌为 VideoMemo / video-memo。
 
-[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/RexVane/video-memo/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/RexVane/video-memo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/RexVane/video-memo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/RexVane/video-memo/releases/tag/v0.1.0
