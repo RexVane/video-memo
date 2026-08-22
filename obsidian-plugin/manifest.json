@@ -1,7 +1,7 @@
 {
   "id": "video-memo",
   "name": "VideoMemo",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "minAppVersion": "1.5.0",
   "description": "Generate structured notes from video links and local media with the VideoMemo Python engine.",
   "author": "VideoMemo",

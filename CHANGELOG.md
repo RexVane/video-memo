@@ -6,6 +6,11 @@
 
 后续修复和发布准备工作将在此记录。
 
+## [0.2.4] - 2026-08-22
+
+- 修复 Obsidian 插件供应商设置页在 cc-switch 数据库被占用时整窗冻结的问题：`node:sqlite` 的同步等待超时从 15 秒降到 1.5 秒，并按"路径 + 修改时间 + 大小"缓存查询结果，设置页重渲染不再反复读库。
+- 供应商设置页读取数据库失败时显示真实错误原因；检测到"database is locked"类错误时提示关闭占用方（如 cc-switch 应用）后重试。
+
 ## [0.2.3] - 2026-08-22
 
 - 加固快速下载的 SSRF 防护：域名解析出任一私网/环回/链路本地地址即拒绝（此前需全部为私网才拒绝），并把连接固定到已校验的 IP 地址，消除校验与连接两次 DNS 解析之间的 rebinding 窗口。
@@ -51,7 +56,8 @@
 - 增加普通 HTTP 直链的校验型 Range 多连接下载，并在不适用时回退到 yt-dlp。
 - 统一项目品牌为 VideoMemo / video-memo。
 
-[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.3...HEAD
+[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.4...HEAD
+[0.2.4]: https://github.com/RexVane/video-memo/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/RexVane/video-memo/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/RexVane/video-memo/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/RexVane/video-memo/compare/v0.2.0...v0.2.1
