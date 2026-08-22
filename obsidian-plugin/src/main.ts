@@ -10,7 +10,7 @@ import {
   normalizePath,
 } from "obsidian";
 
-import { normalizeOpenAiBaseUrl, resolveCcSwitchProviderRuntime } from "./ccswitch";
+import { normalizeOpenAiBaseUrl, nodeSqliteSupported, resolveCcSwitchProviderRuntime } from "./ccswitch";
 import { RunProgressModal, type TaskState } from "./run-progress";
 import {
   activeCustomProvider,
@@ -57,6 +57,19 @@ export default class VideoMemoPlugin extends Plugin {
     }
     if (!stored || JSON.stringify(stored) !== JSON.stringify(this.settings)) {
       await this.saveData(this.settings);
+    }
+    // The cc-switch source reads its database through node:sqlite, which only
+    // exists on Obsidian 1.9.10+ installs (Electron 35 / Node 22.13+). Instead
+    // of failing every task with a database error on older runtimes, fall back
+    // to the custom provider source once and tell the user why.
+    if (this.settings.providerSource === "ccswitch" && !nodeSqliteSupported()) {
+      this.settings.providerSource = "custom";
+      await this.saveData(this.settings);
+      new Notice(
+        "VideoMemo：当前 Obsidian 运行时不支持 node:sqlite，无法读取 cc-switch 数据库。" +
+          "已切换为自定义供应商；升级到 Obsidian 1.9.10 或更新版本的安装器后可改回 cc-switch。",
+        10000,
+      );
     }
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass("video-memo-status");

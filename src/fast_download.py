@@ -164,41 +164,61 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
 _T = TypeVar("_T")
 
 
-def _is_blocked_address(host: str) -> bool:
-    """Return True when a hostname resolves only into non-public address space.
+def _private_urls_allowed() -> bool:
+    return os.environ.get("VIDEOMEMO_ALLOW_PRIVATE_URLS", "").strip() in {"1", "true", "TRUE"}
 
-    Media URLs come from third-party pages, so an attacker-controlled page could
-    otherwise point this transport at a router admin panel, a LAN service, or a
-    cloud metadata endpoint (169.254.169.254). Set ``VIDEOMEMO_ALLOW_PRIVATE_URLS=1``
-    to allow it deliberately (self-hosted media, localhost testing).
-    """
-    if os.environ.get("VIDEOMEMO_ALLOW_PRIVATE_URLS", "").strip() in {"1", "true", "TRUE"}:
-        return False
-    candidates: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-    try:
-        candidates.append(ipaddress.ip_address(host))
-    except ValueError:
-        try:
-            infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
-        except OSError:
-            # Let the actual request surface the resolution failure instead.
-            return False
-        for info in infos:
-            try:
-                candidates.append(ipaddress.ip_address(info[4][0]))
-            except ValueError:
-                continue
-    if not candidates:
-        return False
-    return all(
+
+def _blocked_ip(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
         address.is_private
         or address.is_loopback
         or address.is_link_local
         or address.is_reserved
         or address.is_multicast
         or address.is_unspecified
-        for address in candidates
     )
+
+
+def _blocked_ip_literal(value: str) -> bool:
+    try:
+        return _blocked_ip(ipaddress.ip_address(value))
+    except ValueError:
+        return False
+
+
+def _resolved_addresses(host: str) -> list[str]:
+    """Resolve a host once into a de-duplicated literal IP address list."""
+    try:
+        ipaddress.ip_address(host)
+        return [host]
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return []
+    addresses: list[str] = []
+    for info in infos:
+        candidate = info[4][0]
+        if candidate not in addresses:
+            addresses.append(candidate)
+    return addresses
+
+
+def _is_blocked_address(host: str) -> bool:
+    """Return True when a hostname resolves into any non-public address.
+
+    Media URLs come from third-party pages, so an attacker-controlled page could
+    otherwise point this transport at a router admin panel, a LAN service, or a
+    cloud metadata endpoint (169.254.169.254). A single private candidate blocks
+    the whole host: mixed public/private records are the classic DNS-rebinding
+    setup, and the operating system alone decides which record an unpinned
+    connection would use. Set ``VIDEOMEMO_ALLOW_PRIVATE_URLS=1`` to allow it
+    deliberately (self-hosted media, localhost testing).
+    """
+    if _private_urls_allowed():
+        return False
+    return any(_blocked_ip_literal(candidate) for candidate in _resolved_addresses(host))
 
 
 def _validate_http_url(url: str) -> None:
@@ -441,7 +461,46 @@ class _InterruptibleHTTPResponse(http.client.HTTPResponse):
         )
 
 
-class _TrackedHTTPConnection(http.client.HTTPConnection):
+class _PinnedConnectionMixin:
+    """Connect to a DNS-validated literal address instead of the hostname.
+
+    ``_validate_http_url`` already resolved the host once. Resolving again
+    without pinning would let a rebinding DNS server pass validation with a
+    public record and then hand the real connection a private one, so the
+    same resolution result both decides admissibility and provides the connect
+    target. ``self.host`` stays the hostname, which keeps HTTPS SNI and
+    certificate verification on the original name.
+    """
+
+    def _connect_to_validated_address(self):  # noqa: ANN202
+        candidates = _resolved_addresses(self.host)  # type: ignore[attr-defined]
+        allow_private = _private_urls_allowed()
+        blocked_all = bool(candidates)
+        last_error: OSError | None = None
+        for candidate in candidates:
+            if not allow_private and _blocked_ip_literal(candidate):
+                continue
+            blocked_all = False
+            try:
+                return self._create_connection(  # type: ignore[attr-defined]
+                    (candidate, self.port),  # type: ignore[attr-defined]
+                    self.timeout,  # type: ignore[attr-defined]
+                    self.source_address,  # type: ignore[attr-defined]
+                )
+            except OSError as error:
+                last_error = error
+                continue
+        if blocked_all:
+            raise ValueError(
+                "Refusing to fetch a private, loopback, or link-local address; "
+                "set VIDEOMEMO_ALLOW_PRIVATE_URLS=1 to override"
+            )
+        if last_error is not None:
+            raise last_error
+        raise OSError(f"Could not resolve host: {self.host}")  # type: ignore[attr-defined]
+
+
+class _TrackedHTTPConnection(_PinnedConnectionMixin, http.client.HTTPConnection):
     def __init__(
         self,
         host: str,
@@ -461,13 +520,13 @@ class _TrackedHTTPConnection(http.client.HTTPConnection):
         interruptor.attach(self)
 
     def connect(self) -> None:
-        super().connect()
+        self.sock = self._connect_to_validated_address()
         # Cancellation may arrive while DNS resolution or connect is inside the
         # platform socket layer, before ``self.sock`` can be interrupted.
         self._interruptor.interrupt_if_stopped(self)
 
 
-class _TrackedHTTPSConnection(http.client.HTTPSConnection):
+class _TrackedHTTPSConnection(_PinnedConnectionMixin, http.client.HTTPSConnection):
     def __init__(
         self,
         host: str,
@@ -487,7 +546,10 @@ class _TrackedHTTPSConnection(http.client.HTTPSConnection):
         interruptor.attach(self)
 
     def connect(self) -> None:
-        super().connect()
+        # Mirrors ``http.client.HTTPSConnection.connect`` on top of the pinned
+        # socket: the hostname keeps driving SNI and certificate verification.
+        self.sock = self._connect_to_validated_address()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
         self._interruptor.interrupt_if_stopped(self)
 
 
@@ -617,20 +679,20 @@ def _open(
     blocking call. The request remains in the caller thread while a short-lived
     supervisor shuts down the registered socket on cancellation. This wakes
     delayed response-header reads without leaving one blocked worker per cancel.
+
+    Every branch uses the tracked connection classes so DNS resolution is
+    validated and pinned for probes, single streams, and segments alike; the
+    interruptor stays inert when no event can trigger it.
     """
+    _check_transfer_stop(cancel_event, stop_event)
+    interruptor = _ConnectionInterruptor()
+    opener = _interruptible_opener(interruptor)
     if cancel_event is None and stop_event is None:
-        opener = urllib.request.build_opener(
-            urllib.request.ProxyHandler({}),
-            _SafeRedirectHandler(),
-        )
         try:
             return opener.open(request, timeout=REQUEST_TIMEOUT)
         except BaseException as exc:
             _raise_open_error(exc)
 
-    _check_transfer_stop(cancel_event, stop_event)
-    interruptor = _ConnectionInterruptor()
-    opener = _interruptible_opener(interruptor)
     with _InterruptMonitor(interruptor.interrupt, cancel_event, stop_event):
         try:
             response = opener.open(request, timeout=REQUEST_TIMEOUT)
@@ -1224,6 +1286,28 @@ def _remove_files(paths: list[Path]) -> None:
             pass
 
 
+def _sweep_stale_segments(directory: Path) -> None:
+    """Remove segment debris left by a hard-killed earlier process.
+
+    Segment names embed a per-attempt token, so unlike the main ``.part`` file
+    they can never be reclaimed by ``_reserve_file`` and would otherwise
+    accumulate forever. An active transfer cannot leave a segment untouched for
+    six hours (see ``IDLE_TIMEOUT``), which keeps this sweep away from
+    concurrent runs in the same directory.
+    """
+    now = time.time()
+    try:
+        entries = list(directory.glob(".*.segment-*.part"))
+    except OSError:
+        return
+    for entry in entries:
+        try:
+            if now - entry.stat().st_mtime > STALE_PART_SECONDS:
+                entry.unlink()
+        except OSError:
+            continue
+
+
 def _connection_count(total: int, requested: int) -> int:
     useful = max(1, total // MIN_PART_SIZE)
     return min(requested, useful, total)
@@ -1255,6 +1339,7 @@ def download_http(
     check_cancelled(cancel_event)
 
     # Reserving the exact staging name avoids overwriting another active run.
+    _sweep_stale_segments(destination_path.parent)
     _reserve_file(part_path)
     segments: list[_Segment] = []
     created_segments: list[_Segment] = []

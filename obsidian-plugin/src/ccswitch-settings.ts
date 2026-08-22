@@ -2,6 +2,7 @@ import { Modal, Notice, Setting, type App } from "obsidian";
 import {
   fetchOpenAiCompatibleModels,
   loadCcSwitchProviders,
+  nodeSqliteSupported,
   normalizeApiFormat,
   probeOpenAiCompatibleModel,
   type CcSwitchProvider,
@@ -336,6 +337,15 @@ export class CcSwitchProviderSettingsView {
             await this.options.updateSettings({ ccSwitchDbPath: v.trim() });
           }),
       );
+    if (!nodeSqliteSupported()) {
+      parent.createEl("p", {
+        cls: "video-memo-provider-error",
+        text:
+          "当前 Obsidian 运行时不支持 node:sqlite，无法读取 cc-switch 数据库。" +
+          "请安装 Obsidian 1.9.10 或更新版本的安装器，或改用自定义供应商。",
+      });
+      return;
+    }
     let providers: CcSwitchProvider[];
     try {
       providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;

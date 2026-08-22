@@ -77,6 +77,39 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual("".join(chunks), text)
         self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
 
+    def test_weighted_split_gives_cjk_and_ascii_similar_token_load(self) -> None:
+        # English text carries roughly four times the tokens per character as
+        # CJK text; the same quarter-token budget should therefore produce
+        # chunks of very different character counts.
+        english = ("word " * 400).strip() + "\n"
+        chinese = ("中文内容" * 320).strip() + "\n"
+        budget = 400 * 4  # 400 estimated tokens in quarter-token units
+
+        english_chunks = summarize._split_transcript_weighted(
+            english, budget, summarize._char_weight
+        )
+        chinese_chunks = summarize._split_transcript_weighted(
+            chinese, budget, summarize._char_weight
+        )
+
+        self.assertEqual("".join(english_chunks), english)
+        self.assertEqual("".join(chinese_chunks), chinese)
+        self.assertGreater(
+            len(english_chunks[0]),
+            len(chinese_chunks[0]) * 2,
+        )
+        self.assertTrue(
+            all(
+                summarize._text_weight(chunk) <= budget
+                for chunk in english_chunks + chinese_chunks
+            )
+        )
+
+    def test_estimate_tokens_counts_cjk_more_heavily(self) -> None:
+        self.assertEqual(summarize._estimate_tokens("一二三四"), 4)
+        self.assertEqual(summarize._estimate_tokens("abcdefgh"), 2)
+        self.assertEqual(summarize._estimate_tokens("一二ab"), 3)
+
     @patch("summarize._b64_image", side_effect=lambda path: path.stem)
     @patch("summarize._chat_completion")
     @patch("summarize._client")
@@ -173,7 +206,7 @@ class SummarizeTests(unittest.TestCase):
             )
 
         client.chat.completions.create.side_effect = create
-        with patch.object(summarize, "DETAILED_CHUNK_SIZE", 20):
+        with patch.object(summarize, "CHAPTER_CHUNK_TOKENS", 5):
             notes = summarize._generate_chapter_notes(
                 client,
                 title="Course",
@@ -282,7 +315,7 @@ class SummarizeTests(unittest.TestCase):
         client.chat.completions.create.side_effect = RuntimeError("notes unavailable")
         progress: list[str] = []
 
-        with patch.object(summarize, "DETAILED_CHUNK_SIZE", 20):
+        with patch.object(summarize, "CHAPTER_CHUNK_TOKENS", 5):
             notes = summarize._generate_chapter_notes(
                 client,
                 title="Course",
@@ -295,6 +328,23 @@ class SummarizeTests(unittest.TestCase):
         self.assertTrue(all("章节整理失败" in note for note in notes))
         self.assertTrue(all("未整理的原始转写片段" in note for note in notes))
         self.assertTrue(any("全部 3 段" in message for message in progress))
+        # The friendly reason from the retry layer must reach the user instead
+        # of a bare "整理失败".
+        self.assertTrue(all("失败原因：notes unavailable" in note for note in notes))
+        self.assertTrue(any("notes unavailable" in message for message in progress))
+
+    def test_unexpected_chapter_error_fails_the_run(self) -> None:
+        client = MagicMock()
+        client.chat.completions.create.side_effect = KeyError("programming bug")
+
+        with patch.object(summarize, "CHAPTER_CHUNK_TOKENS", 5):
+            with self.assertRaises(KeyError):
+                summarize._generate_chapter_notes(
+                    client,
+                    title="Course",
+                    transcript="[00:00] " + "a" * 45,
+                    model="test-model",
+                )
 
     def test_responses_api_converts_multimodal_messages(self) -> None:
         client = MagicMock()
@@ -400,7 +450,7 @@ class SummarizeTests(unittest.TestCase):
         client.chat.completions.create.return_value = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="chapter notes"))]
         )
-        with patch.object(summarize, "DETAILED_CHUNK_SIZE", 20):
+        with patch.object(summarize, "CHAPTER_CHUNK_TOKENS", 5):
             notes = summarize._generate_chapter_notes(
                 client,
                 title="Course",

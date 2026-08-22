@@ -15,15 +15,19 @@ from pathlib import Path
 from typing import Callable
 
 import httpx
-from openai import APIConnectionError, APIStatusError, OpenAI
+from openai import APIConnectionError, APIStatusError, OpenAI, OpenAIError
 
 from cancellation import CancellationRequested, CancellationSignal, check_cancelled
 from llm_config import default_model, resolve_llm_config
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024
-DETAILED_CHUNK_SIZE = 6_500
-MAX_DETAILED_CHUNKS = 12
+# Chapter requests are sized by a token estimate (CJK characters ~1 token each,
+# other text ~4 characters per token). A fixed character budget both overflows
+# 8K-context models on Chinese transcripts and under-fills requests on English
+# ones, where 6,500 characters carry roughly four times the tokens.
+CHAPTER_CHUNK_TOKENS = 4_500
+MAX_DETAILED_CHUNKS = 16
 MAX_API_ATTEMPTS = 3
 RETRY_DELAYS = (2.0, 5.0)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
@@ -286,27 +290,82 @@ def _select_frames_within_budget(frames: list[Path]) -> tuple[list[Path], int]:
 
 def _split_transcript(text: str, max_chars: int) -> list[str]:
     """Split on transcript lines while keeping every character in order."""
-    if max_chars < 1:
-        raise ValueError("max_chars 必须大于 0")
+    return _split_transcript_weighted(text, max_chars, _unit_char_weight)
+
+
+def _unit_char_weight(_: str) -> int:
+    return 1
+
+
+_CJK_CHAR_RE = re.compile(
+    "[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+    "\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]"
+)
+
+
+def _char_weight(char: str) -> int:
+    """Estimate cost in quarter-tokens: 4 per CJK character, 1 otherwise."""
+    return 4 if _CJK_CHAR_RE.match(char) else 1
+
+
+def _text_weight(text: str) -> int:
+    cjk = len(_CJK_CHAR_RE.findall(text))
+    return cjk * 4 + (len(text) - cjk)
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate used for chapter request sizing."""
+    return math.ceil(_text_weight(text) / 4)
+
+
+def _weighted_prefix_length(line: str, max_weight: int, char_weight) -> int:  # noqa: ANN001
+    total = 0
+    for index, char in enumerate(line):
+        total += char_weight(char)
+        if total > max_weight:
+            return max(1, index)
+    return len(line)
+
+
+def _split_transcript_weighted(
+    text: str,
+    max_weight: int,
+    char_weight,  # noqa: ANN001
+) -> list[str]:
+    """Split on transcript lines by character weight, preserving all content.
+
+    ``char_weight`` assigns an integer cost per character. Lines accumulate
+    until one more would exceed ``max_weight``; a heavier single line is
+    hard-split at the budget boundary and only its tail returns to the
+    accumulator, mirroring the character-count behaviour.
+    """
+    if max_weight < 1:
+        raise ValueError("max_weight 必须大于 0")
+
+    def weight(value: str) -> int:
+        return sum(char_weight(char) for char in value)
+
     chunks: list[str] = []
     current: list[str] = []
     current_size = 0
 
     for line in text.splitlines(keepends=True):
-        while len(line) > max_chars:
+        while weight(line) > max_weight:
             if current:
                 chunks.append("".join(current))
                 current = []
                 current_size = 0
-            chunks.append(line[:max_chars])
-            line = line[max_chars:]
+            cut = _weighted_prefix_length(line, max_weight, char_weight)
+            chunks.append(line[:cut])
+            line = line[cut:]
 
-        if current and current_size + len(line) > max_chars:
+        line_size = weight(line)
+        if current and current_size + line_size > max_weight:
             chunks.append("".join(current))
             current = []
             current_size = 0
         current.append(line)
-        current_size += len(line)
+        current_size += line_size
 
     if current:
         chunks.append("".join(current))
@@ -675,21 +734,42 @@ def _chapter_callout(note: str) -> str:
     return f"> [!note]- {title}\n>\n{quoted_body}"
 
 
-def _missing_chapter_note(index: int, total: int, chunk: str) -> str:
+def _missing_chapter_note(index: int, total: int, chunk: str, reason: str = "") -> str:
     """Return a visible placeholder when one chapter request fails."""
     start, end = _timestamp_bounds(chunk)
     excerpt = chunk.strip()
     if len(excerpt) > 1_000:
         excerpt = excerpt[:1_000].rstrip() + "…"
     quoted_excerpt = "\n".join(f"> {line}" if line else ">" for line in excerpt.splitlines())
+    failure_line = f"> 失败原因：{reason}\n" if reason else ""
     return (
         f"### {start}-{end}（第 {index}/{total} 段未能整理）\n\n"
         "> [!warning] 章节整理失败\n"
         "> 该时间段的详细章节笔记未生成；请重新生成报告以重试。\n"
+        f"{failure_line}"
         ">\n"
         "> **未整理的原始转写片段**\n"
         f"{quoted_excerpt}"
     )
+
+
+# Failures the chapter phase treats as per-chapter API problems: everything the
+# retry layer already converts into a friendly RuntimeError, plus transport
+# errors from the OpenAI/Anthropic clients. Anything else is a programming
+# error and must surface instead of hiding behind a placeholder note.
+_CHAPTER_API_ERRORS: tuple[type[BaseException], ...] = (
+    RuntimeError,
+    OpenAIError,
+    httpx.HTTPError,
+    OSError,
+    TimeoutError,
+)
+
+
+def _failure_reason(error: BaseException) -> str:
+    text = " ".join(str(error).split())
+    reason = _redact(text) if text else type(error).__name__
+    return reason[:200]
 
 
 def _generate_chapter_notes(
@@ -707,11 +787,11 @@ def _generate_chapter_notes(
     if not transcript.strip():
         return []
 
-    chunk_size = max(
-        DETAILED_CHUNK_SIZE,
-        math.ceil(len(transcript) / MAX_DETAILED_CHUNKS),
+    chunk_budget = max(
+        CHAPTER_CHUNK_TOKENS * 4,
+        math.ceil(_text_weight(transcript) / MAX_DETAILED_CHUNKS),
     )
-    chunks = _split_transcript(transcript, chunk_size)
+    chunks = _split_transcript_weighted(transcript, chunk_budget, _char_weight)
     notes: list[str | None] = [None] * len(chunks)
     notes_model = os.environ.get("LLM_NOTES_MODEL", "").strip() or model
     system = (
@@ -775,26 +855,31 @@ def _generate_chapter_notes(
         }
         completed = 0
         failures = 0
+        first_failure_reason = ""
         for future in as_completed(future_indexes):
             check_cancelled(cancel_event)
             try:
                 note_index, note = future.result()
             except CancellationRequested:
                 raise
-            except Exception:
+            except _CHAPTER_API_ERRORS as error:
                 # One bad chunk must not discard the chapters that did succeed;
                 # the gap is recorded in the note instead of failing the run.
                 failures += 1
+                reason = _failure_reason(error)
+                if not first_failure_reason:
+                    first_failure_reason = reason
                 failed_index = future_indexes[future]
                 notes[failed_index - 1] = _missing_chapter_note(
                     failed_index,
                     len(chunks),
                     chunks[failed_index - 1],
+                    reason=reason,
                 )
                 completed += 1
                 if on_progress:
                     on_progress(
-                        f"第 {completed}/{len(chunks)} 段整理失败，将标记该段缺失",
+                        f"第 {completed}/{len(chunks)} 段整理失败（{reason}），将标记该段缺失",
                         min(
                             CHAPTER_PHASE_CEILING,
                             completed / (len(chunks) + 1),
@@ -814,6 +899,8 @@ def _generate_chapter_notes(
                     f"注意：全部 {len(chunks)} 段均未能整理，"
                     "报告将保留缺失标记和原始转写片段"
                 )
+                if first_failure_reason:
+                    message += f"（原因：{first_failure_reason}）"
             else:
                 message = (
                     f"注意：{failures}/{len(chunks)} 段未能整理，"

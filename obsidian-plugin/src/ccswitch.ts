@@ -355,6 +355,24 @@ export function resolveCcSwitchDbPath(configuredPath: string): string {
   return resolve(expanded || defaultCcSwitchDbPath());
 }
 
+/**
+ * Whether this Obsidian/Electron runtime ships the `node:sqlite` module.
+ *
+ * Reading the cc-switch database needs Node >= 22.13 (Electron >= 35), which
+ * reached the public desktop channel with Obsidian 1.9.10 and its updated
+ * installer. Older runtimes keep the whole plugin working through the custom
+ * provider source, so callers should detect this instead of guessing from the
+ * app version — the installer, not the app version, decides the runtime.
+ */
+export function nodeSqliteSupported(): boolean {
+  try {
+    require("node:sqlite");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function loadNodeSqlite(): typeof import("node:sqlite") {
   try {
     return require("node:sqlite") as typeof import("node:sqlite");

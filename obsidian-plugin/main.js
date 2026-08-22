@@ -739,6 +739,7 @@ __export(ccswitch_exports, {
   fetchCcSwitchProviderModels: () => fetchCcSwitchProviderModels,
   fetchOpenAiCompatibleModels: () => fetchOpenAiCompatibleModels,
   loadCcSwitchProviders: () => loadCcSwitchProviders,
+  nodeSqliteSupported: () => nodeSqliteSupported,
   normalizeApiFormat: () => normalizeApiFormat,
   normalizeOpenAiBaseUrl: () => normalizeOpenAiBaseUrl,
   openAiModelsUrl: () => openAiModelsUrl,
@@ -958,6 +959,14 @@ function resolveCcSwitchDbPath(configuredPath) {
   const configured = configuredPath.trim();
   const expanded = configured.startsWith("~") ? (0, import_node_path.join)((0, import_node_os.homedir)(), configured.slice(1).replace(/^[/\\]+/, "")) : configured;
   return (0, import_node_path.resolve)(expanded || defaultCcSwitchDbPath());
+}
+function nodeSqliteSupported() {
+  try {
+    require("node:sqlite");
+    return true;
+  } catch {
+    return false;
+  }
 }
 function loadNodeSqlite() {
   try {
@@ -1456,6 +1465,9 @@ function describeProviderSelection(settings) {
     }
     return model ? `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u6A21\u578B ${model}` : `\u81EA\u5B9A\u4E49 \xB7 ${name} \xB7 \u5C1A\u672A\u9009\u62E9\u6A21\u578B`;
   }
+  if (!nodeSqliteSupported()) {
+    return "cc-switch \xB7 \u9700\u8981 Obsidian 1.9.10+\uFF08node:sqlite\uFF09";
+  }
   try {
     const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
     const provider = settings.ccSwitchFollowCurrent ? providers.find(
@@ -1706,6 +1718,13 @@ var CcSwitchProviderSettingsView = class {
         await this.options.updateSettings({ ccSwitchDbPath: v.trim() });
       })
     );
+    if (!nodeSqliteSupported()) {
+      parent.createEl("p", {
+        cls: "video-memo-provider-error",
+        text: "\u5F53\u524D Obsidian \u8FD0\u884C\u65F6\u4E0D\u652F\u6301 node:sqlite\uFF0C\u65E0\u6CD5\u8BFB\u53D6 cc-switch \u6570\u636E\u5E93\u3002\u8BF7\u5B89\u88C5 Obsidian 1.9.10 \u6216\u66F4\u65B0\u7248\u672C\u7684\u5B89\u88C5\u5668\uFF0C\u6216\u6539\u7528\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u3002"
+      });
+      return;
+    }
     let providers;
     try {
       providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
@@ -2151,6 +2170,14 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     }
     if (!stored || JSON.stringify(stored) !== JSON.stringify(this.settings)) {
       await this.saveData(this.settings);
+    }
+    if (this.settings.providerSource === "ccswitch" && !nodeSqliteSupported()) {
+      this.settings.providerSource = "custom";
+      await this.saveData(this.settings);
+      new import_obsidian6.Notice(
+        "VideoMemo\uFF1A\u5F53\u524D Obsidian \u8FD0\u884C\u65F6\u4E0D\u652F\u6301 node:sqlite\uFF0C\u65E0\u6CD5\u8BFB\u53D6 cc-switch \u6570\u636E\u5E93\u3002\u5DF2\u5207\u6362\u4E3A\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\uFF1B\u5347\u7EA7\u5230 Obsidian 1.9.10 \u6216\u66F4\u65B0\u7248\u672C\u7684\u5B89\u88C5\u5668\u540E\u53EF\u6539\u56DE cc-switch\u3002",
+        1e4
+      );
     }
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass("video-memo-status");

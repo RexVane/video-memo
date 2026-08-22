@@ -35,6 +35,6 @@ Provider settings support a read-only cc-switch database and custom OpenAI-compa
 
 Each custom provider's API key is stored in plaintext in the current Vault's `.obsidian/plugins/video-memo/data.json`. They are not placed in command-line arguments, logs, or output files. Do not commit, share, or sync that file to untrusted devices. Use trusted HTTPS services in production; localhost HTTP is supported.
 
-The cc-switch database view requires an Obsidian/Electron runtime with `node:sqlite`. On older desktop runtimes, the plugin still loads and can use the custom provider source.
+The cc-switch database view requires an Obsidian/Electron runtime with `node:sqlite` (Obsidian 1.9.10+ with the updated installer). On older desktop runtimes, the plugin detects the missing module at startup, switches the provider source to custom providers, and explains why; the custom provider workflow keeps working.
 
 The plugin source and bundled object code are released under the [MIT License](LICENSE). Third-party dependencies retain their respective licenses; see `NOTICE`, `COPYRIGHT.md`, and the repository's `THIRD-PARTY-NOTICES.md`.

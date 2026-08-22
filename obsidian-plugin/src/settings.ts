@@ -1,4 +1,8 @@
-import { loadCcSwitchProviders, normalizeApiFormat } from "./ccswitch";
+import {
+  loadCcSwitchProviders,
+  nodeSqliteSupported,
+  normalizeApiFormat,
+} from "./ccswitch";
 import type {
   CcSwitchUiSettings,
   CustomProviderConfig,
@@ -149,6 +153,9 @@ export function describeProviderSelection(settings: VideoMemoSettings): string {
       return `自定义 · ${name} · 配置需要检查`;
     }
     return model ? `自定义 · ${name} · 模型 ${model}` : `自定义 · ${name} · 尚未选择模型`;
+  }
+  if (!nodeSqliteSupported()) {
+    return "cc-switch · 需要 Obsidian 1.9.10+（node:sqlite）";
   }
   try {
     const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;

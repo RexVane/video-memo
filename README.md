@@ -26,7 +26,7 @@ Markdown report, with optional Obsidian note and frame attachments
 - Local media is read in place. The original file is never copied or deleted. Video can be sampled for visual analysis; audio skips frame extraction.
 - Subtitles are preferred in this order: platform-provided manual subtitles, automatic subtitles, then local Whisper transcription.
 - Transcription stays local. Summary requests send the transcript and selected key frames to the model service you configure.
-- Private, loopback, and link-local addresses are rejected by the fast downloader by default. Set `VIDEOMEMO_ALLOW_PRIVATE_URLS=1` only for a trusted local media server.
+- Private, loopback, and link-local addresses are rejected by the fast downloader by default; a hostname is rejected when any resolved address is private, and connections are pinned to validated addresses to close DNS-rebinding gaps. Set `VIDEOMEMO_ALLOW_PRIVATE_URLS=1` only for a trusted local media server.
 
 ## Requirements
 
@@ -36,7 +36,7 @@ Markdown report, with optional Obsidian note and frame attachments
 | ffmpeg | Required and available on `PATH`; binaries are not bundled |
 | ffprobe | Recommended; some media durations cannot be read without it |
 | Windows GUI | Windows 10/11; a project `.venv` is recommended |
-| Obsidian plugin | Desktop Obsidian; mobile Obsidian is not supported |
+| Obsidian plugin | Desktop Obsidian; mobile Obsidian is not supported. The cc-switch provider source additionally needs Obsidian 1.9.10+ (an installer with `node:sqlite`); custom providers work on older runtimes |
 | Node.js | 18+ only when building the plugin from source |
 | Model | An image-capable OpenAI-compatible model when vision is enabled; `--no-vision` only requires a text model |
 
@@ -165,7 +165,7 @@ The installer places the built files under:
 
 Enable the plugin and set the directory containing `src/pipeline.py` in its settings. Python is detected from that project's `.venv`, then falls back to `python` on `PATH`. The installer copies the built runtime files (`main.js`, `manifest.json`, and `styles.css`) together with `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; TypeScript source and build configuration remain in this repository.
 
-Provider settings support a read-only cc-switch database and multiple editable OpenAI-compatible custom providers. Each custom provider has a name, API root URL, API key, protocol format, and model, with one active provider at a time. The plugin can discover models through `/models`; "Test connection" fetches the model list and sends a minimal real request to the selected model. Enter a root such as `https://example.com/v1`, not `/chat/completions`, `/responses`, or `/messages`.
+Provider settings support a read-only cc-switch database and multiple editable OpenAI-compatible custom providers. Reading the cc-switch database requires a runtime with `node:sqlite` (Obsidian 1.9.10+ with the updated installer); on older runtimes the plugin detects this and falls back to the custom provider source. Each custom provider has a name, API root URL, API key, protocol format, and model, with one active provider at a time. The plugin can discover models through `/models`; "Test connection" fetches the model list and sends a minimal real request to the selected model. Enter a root such as `https://example.com/v1`, not `/chat/completions`, `/responses`, or `/messages`.
 
 Custom provider API keys are stored in plaintext in the current vault at `.obsidian/plugins/video-memo/data.json`. They are not put in command-line arguments, logs, or output files. Never commit, share, or sync this file to an untrusted device. The custom-provider workflow remains available on older Obsidian/Electron runtimes that lack `node:sqlite`.
 

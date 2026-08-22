@@ -539,6 +539,89 @@ class FastDownloadTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "private, loopback"):
                 fast_download._validate_http_url("http://127.0.0.1/media.mp4")
 
+    def test_mixed_public_private_resolution_is_blocked(self) -> None:
+        # A single private candidate blocks the host: mixed records are the
+        # DNS-rebinding signature, and the OS alone picks which record an
+        # unpinned connection would use.
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VIDEOMEMO_ALLOW_PRIVATE_URLS", None)
+            with patch.object(
+                fast_download.socket,
+                "getaddrinfo",
+                return_value=[
+                    (..., ..., ..., ..., ("93.184.216.34", 0)),
+                    (..., ..., ..., ..., ("192.168.1.10", 0)),
+                ],
+            ):
+                self.assertTrue(fast_download._is_blocked_address("cdn.example.test"))
+
+    def test_connection_pins_validated_address_with_single_resolution(self) -> None:
+        class _FakeInterruptor:
+            def attach(self, connection) -> None:  # noqa: ANN001
+                pass
+
+            def interrupt_if_stopped(self, connection) -> None:  # noqa: ANN001
+                pass
+
+        connected: list[tuple[str, int]] = []
+        resolutions = []
+
+        def fake_getaddrinfo(host, port, **kwargs):  # noqa: ANN001, ANN202
+            resolutions.append(host)
+            return [
+                (..., ..., ..., ..., ("93.184.216.34", 0)),
+                (..., ..., ..., ..., ("203.0.113.7", 0)),
+            ]
+
+        def fake_create_connection(address, *args, **kwargs):  # noqa: ANN001, ANN202
+            connected.append(address)
+            return object()
+
+        with patch.object(fast_download.socket, "getaddrinfo", side_effect=fake_getaddrinfo):
+            connection = fast_download._TrackedHTTPConnection(
+                "cdn.example.test",
+                _FakeInterruptor(),
+                timeout=1.0,
+            )
+            # ``_create_connection`` is a class attribute captured from
+            # ``socket.create_connection`` at class definition; shadow it on the
+            # instance so the fake observes the pinned connect target.
+            connection._create_connection = fake_create_connection
+            connection.connect()
+
+        self.assertEqual(resolutions, ["cdn.example.test"])
+        self.assertEqual(connected, [("93.184.216.34", 80)])
+
+    def test_connection_refuses_rebound_private_address(self) -> None:
+        class _FakeInterruptor:
+            def attach(self, connection) -> None:  # noqa: ANN001
+                pass
+
+            def interrupt_if_stopped(self, connection) -> None:  # noqa: ANN001
+                pass
+
+        attempts: list[str] = []
+
+        def fake_getaddrinfo(host, port, **kwargs):  # noqa: ANN001, ANN202
+            attempts.append(host)
+            return [(..., ..., ..., ..., ("127.0.0.1", 0))]
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("VIDEOMEMO_ALLOW_PRIVATE_URLS", None)
+            with patch.object(
+                fast_download.socket,
+                "getaddrinfo",
+                side_effect=fake_getaddrinfo,
+            ):
+                connection = fast_download._TrackedHTTPConnection(
+                    "rebind.example.test",
+                    _FakeInterruptor(),
+                    timeout=1.0,
+                )
+                with self.assertRaisesRegex(ValueError, "private, loopback"):
+                    connection.connect()
+        self.assertEqual(attempts, ["rebind.example.test"])
+
     def test_stale_part_file_is_reclaimed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             part = Path(tmp) / "video.part"
@@ -550,6 +633,25 @@ class FastDownloadTests(unittest.TestCase):
 
             self.assertTrue(part.exists())
             self.assertEqual(part.stat().st_size, 0)
+
+    def test_stale_segment_debris_is_swept_but_active_segments_survive(self) -> None:
+        with _serve() as server, tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stale = root / ".video.bin.deadbeef.segment-0.part"
+            stale.write_bytes(b"debris")
+            active = root / ".video.bin.livebeef.segment-0.part"
+            active.write_bytes(b"live")
+            stale_time = time.time() - fast_download.STALE_PART_SECONDS - 1
+            os.utime(stale, (stale_time, stale_time))
+
+            destination = root / "video.bin"
+            fast_download.download_http(f"{server.base_url}/file", destination)
+
+            self.assertEqual(destination.read_bytes(), DATA)
+            self.assertFalse(stale.exists())
+            # A fresh segment belongs to a potentially active concurrent run
+            # and must survive the sweep; the tempdir cleans it up afterwards.
+            self.assertTrue(active.exists())
 
 
 if __name__ == "__main__":

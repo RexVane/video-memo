@@ -553,6 +553,102 @@ class DownloadTests(unittest.TestCase):
 
     @patch("download.fast_download.download_http")
     @patch("download.subprocess.run")
+    def test_fast_download_reports_combined_byte_progress(
+        self, run_mock, fast_mock
+    ) -> None:
+        plan = download.MediaTransferPlan(
+            video=download._media_part(
+                _format("video.webm", ext="webm", vcodec="vp9", acodec="none")
+            ),
+            audio=download._media_part(
+                _format("audio.m4a", ext="m4a", vcodec="none", acodec="mp4a")
+            ),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+
+            def fake_fast(url, destination, **kwargs):
+                on_progress = kwargs.get("on_progress")
+                if on_progress is not None:
+                    on_progress(300, 500 if "video" in url else 100)
+                Path(destination).write_bytes(url.encode("utf-8"))
+                return SimpleNamespace(destination=Path(destination))
+
+            def fake_run(command, **kwargs):
+                if command[0] == "ffmpeg" and "copy" in command:
+                    Path(command[-1]).write_bytes(b"merged")
+                else:
+                    Path(command[-1]).write_bytes(b"RIFF" + (b"0" * 64))
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            fast_mock.side_effect = fake_fast
+            run_mock.side_effect = fake_run
+            reports: list[tuple[int, int | None]] = []
+            download.download(
+                "https://example.test/course",
+                work,
+                metadata=_metadata_with_plan(plan),
+                on_progress=lambda current, total: reports.append((current, total)),
+            )
+
+        self.assertTrue(reports)
+        # Aggregation sums the streams that have reported so far: the first
+        # callback carries only the video stream, the last one both.
+        self.assertEqual(reports[0], (300, 500))
+        self.assertEqual(reports[-1], (600, 600))
+
+    @patch("download.fast_download.download_http")
+    @patch("download.subprocess.run")
+    def test_separate_stream_failure_cleans_both_and_falls_back(
+        self, run_mock, fast_mock
+    ) -> None:
+        plan = download.MediaTransferPlan(
+            video=download._media_part(
+                _format("video.webm", ext="webm", vcodec="vp9", acodec="none")
+            ),
+            audio=download._media_part(
+                _format("audio.m4a", ext="m4a", vcodec="none", acodec="mp4a")
+            ),
+        )
+
+        def fake_fast(url, destination, **kwargs):
+            if "video" in url:
+                Path(destination).write_bytes(b"video bytes")
+                return SimpleNamespace(destination=Path(destination))
+            raise RuntimeError("audio stream failed")
+
+        fast_mock.side_effect = fake_fast
+
+        def fake_run(command, **kwargs):
+            if _is_yt_dlp_command(command):
+                (work / "source.webm").write_bytes(b"fallback")
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=str(work / "source.webm") + "\n",
+                    stderr="",
+                )
+            Path(command[-1]).write_bytes(b"RIFF" + (b"0" * 64))
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        run_mock.side_effect = fake_run
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            result = download.download(
+                "https://example.test/course",
+                work,
+                metadata=_metadata_with_plan(plan),
+            )
+
+            self.assertEqual(result.video_path, work / "source.webm")
+            self.assertTrue(result.audio_path.is_file())
+            self.assertFalse(
+                any(path.name.startswith(".fast-download-") for path in work.iterdir())
+            )
+            info = json.loads((work / "info.json").read_text(encoding="utf-8"))
+            self.assertEqual(info["download_backend"], "yt-dlp")
+
+    @patch("download.fast_download.download_http")
+    @patch("download.subprocess.run")
     def test_fast_success_runs_subtitle_only_command(
         self, run_mock, fast_mock
     ) -> None:

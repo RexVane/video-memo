@@ -26,7 +26,7 @@ Markdown 报告，可选导出 Obsidian 笔记和画面附件
 - 本地媒体直接读取原文件，不复制、不删除。视频可以抽帧进行画面分析，音频会自动跳过抽帧。
 - 字幕优先级为：平台手工字幕、平台自动字幕、本地 Whisper 转写。
 - 转写在本地完成；摘要请求会将转写和选定关键帧发送给你配置的模型服务。
-- 快速下载默认拒绝私网、环回和链路本地地址。只有在确认媒体服务器可信时，才设置 `VIDEOMEMO_ALLOW_PRIVATE_URLS=1`。
+- 快速下载默认拒绝私网、环回和链路本地地址；域名只要解析出任一私网地址即被拒绝，且连接固定到已校验的地址以封堵 DNS rebinding。只有在确认媒体服务器可信时，才设置 `VIDEOMEMO_ALLOW_PRIVATE_URLS=1`。
 
 ## 支持环境
 
@@ -36,7 +36,7 @@ Markdown 报告，可选导出 Obsidian 笔记和画面附件
 | ffmpeg | 必须安装并加入 `PATH`；项目不捆绑二进制 |
 | ffprobe | 推荐安装；缺失时无法读取部分媒体时长 |
 | Windows GUI | Windows 10/11；推荐使用项目 `.venv` |
-| Obsidian 插件 | 桌面版 Obsidian；不支持移动端 |
+| Obsidian 插件 | 桌面版 Obsidian；不支持移动端。cc-switch 供应商来源额外需要 Obsidian 1.9.10 或更新版本的安装器（内置 `node:sqlite`）；旧运行时可使用自定义供应商 |
 | Node.js | 仅从源码构建插件时需要 18+ |
 | 模型 | 启用画面分析时需要支持图片输入的 OpenAI-compatible 模型；`--no-vision` 只需要文本模型 |
 
@@ -165,7 +165,7 @@ npm.cmd run build
 
 启用插件后，在设置中填写包含 `src/pipeline.py` 的项目目录。Python 会优先检测该项目的 `.venv`，未找到时回退到 `PATH` 中的 `python`。安装脚本会复制构建后的运行文件（`main.js`、`manifest.json` 和 `styles.css`）以及 `LICENSE`、`NOTICE` 和 `COPYRIGHT.md`；TypeScript 源码与构建配置保留在本仓库。
 
-供应商设置支持只读的 cc-switch 数据库，也支持添加多个可编辑的 OpenAI-compatible 自定义供应商。每个自定义供应商可填写名称、API 根地址、API key、协议格式和模型，并选择一个当前供应商。插件可通过 `/models` 发现模型；“测试连接”会获取模型列表，再向所选模型发送一次最小真实请求。Base URL 应填写 `https://example.com/v1` 这类根地址，不要填写 `/chat/completions`、`/responses` 或 `/messages`。
+供应商设置支持只读的 cc-switch 数据库，也支持添加多个可编辑的 OpenAI-compatible 自定义供应商。读取 cc-switch 数据库需要内置 `node:sqlite` 的运行时（Obsidian 1.9.10 或更新版本的安装器）；旧运行时上插件会自动检测并回退到自定义供应商。每个自定义供应商可填写名称、API 根地址、API key、协议格式和模型，并选择一个当前供应商。插件可通过 `/models` 发现模型；“测试连接”会获取模型列表，再向所选模型发送一次最小真实请求。Base URL 应填写 `https://example.com/v1` 这类根地址，不要填写 `/chat/completions`、`/responses` 或 `/messages`。
 
 自定义供应商 API key 会以明文保存在当前 Vault 的 `.obsidian/plugins/video-memo/data.json` 中，不会进入命令行参数、日志或输出文件。不要提交、分享或将该文件同步到不受信任的设备。缺少 `node:sqlite` 的旧版 Obsidian/Electron 仍可使用自定义供应商。
 

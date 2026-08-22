@@ -7,12 +7,14 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from importlib import import_module
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
+from typing import Callable, Mapping
 from urllib.parse import urlsplit
 
 import fast_download
@@ -645,15 +647,18 @@ def _subtitle_download_command(
 
 
 def _remove_fast_paths(paths: list[Path]) -> None:
+    """Remove fast-layer staging outputs, including crash-left segment debris."""
     for path in paths:
+        leftovers = [path, Path(f"{path}.part")]
         try:
-            path.unlink()
-        except FileNotFoundError:
+            leftovers.extend(path.parent.glob(f".{path.name}.*.segment-*.part"))
+        except OSError:
             pass
-        try:
-            Path(f"{path}.part").unlink()
-        except FileNotFoundError:
-            pass
+        for leftover in leftovers:
+            try:
+                leftover.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _snapshot_source_files(work_dir: Path) -> dict[Path, tuple[int, int]]:
@@ -700,12 +705,38 @@ def _checked_fast_destination(work_dir: Path, name: str) -> Path:
     return path
 
 
+class _CombinedProgress:
+    """Aggregate byte progress from concurrent stream downloads."""
+
+    def __init__(self, callback: Callable[[int, int | None], None] | None) -> None:
+        self._callback = callback
+        self._lock = threading.Lock()
+        self._current: dict[object, int] = {}
+        self._total: dict[object, int | None] = {}
+
+    def reporter(self, key: object) -> Callable[[int, int | None], None]:
+        def report(current: int, total: int | None) -> None:
+            if self._callback is None:
+                return
+            with self._lock:
+                self._current[key] = current
+                self._total[key] = total
+                current_sum = sum(self._current.values())
+                totals = list(self._total.values())
+            known_total = sum(value for value in totals if value is not None)
+            grand_total = known_total if None not in totals else None
+            self._callback(current_sum, grand_total)
+
+        return report
+
+
 def _commit_progressive(
     part: MediaPart,
     work_dir: Path,
     created_paths: list[Path],
     *,
     cancel_event: CancellationSignal | None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     staged = _checked_fast_destination(
         work_dir,
@@ -718,6 +749,7 @@ def _commit_progressive(
         staged,
         headers=part.http_headers,
         cancel_event=cancel_event,
+        on_progress=on_progress,
     )
     check_cancelled(cancel_event)
     if not staged.is_file() or staged.stat().st_size <= 0:
@@ -735,6 +767,7 @@ def _commit_separate(
     created_paths: list[Path],
     *,
     cancel_event: CancellationSignal | None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     if plan.video is None or plan.audio is None:
         raise RuntimeError("高速下载计划缺少音视频流")
@@ -753,18 +786,37 @@ def _commit_separate(
     )
     final = _checked_fast_destination(work_dir, "source.mp4")
     created_paths.extend([video, audio, merged])
-    fast_download.download_http(
-        plan.video.url,
-        video,
-        headers=plan.video.http_headers,
-        cancel_event=cancel_event,
-    )
-    fast_download.download_http(
-        plan.audio.url,
-        audio,
-        headers=plan.audio.http_headers,
-        cancel_event=cancel_event,
-    )
+    # The two streams are independent HTTP resources; downloading them in
+    # parallel halves the wall-clock time of the fast transport. A failure in
+    # one stream still lets the other finish (both are cheap to discard) so the
+    # shared cleanup and yt-dlp fallback below see a stable directory.
+    combined = _CombinedProgress(on_progress)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(
+                fast_download.download_http,
+                stream.url,
+                target,
+                headers=stream.http_headers,
+                cancel_event=cancel_event,
+                on_progress=combined.reporter(key),
+            )
+            for key, stream, target in (
+                ("video", plan.video, video),
+                ("audio", plan.audio, audio),
+            )
+        ]
+        failures: list[BaseException] = []
+        for future in futures:
+            try:
+                future.result()
+            except BaseException as error:  # noqa: BLE001
+                failures.append(error)
+    for failure in failures:
+        if isinstance(failure, CancellationRequested):
+            raise failure
+    if failures:
+        raise failures[0]
     merge = run_command(
         [
             "ffmpeg",
@@ -801,6 +853,7 @@ def _fast_download_media(
     created_paths: list[Path],
     *,
     cancel_event: CancellationSignal | None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> Path:
     if plan.progressive is not None and plan.video is None and plan.audio is None:
         return _commit_progressive(
@@ -808,6 +861,7 @@ def _fast_download_media(
             work_dir,
             created_paths,
             cancel_event=cancel_event,
+            on_progress=on_progress,
         )
     if plan.progressive is None and plan.video is not None and plan.audio is not None:
         return _commit_separate(
@@ -815,6 +869,7 @@ def _fast_download_media(
             work_dir,
             created_paths,
             cancel_event=cancel_event,
+            on_progress=on_progress,
         )
     raise RuntimeError("高速下载计划无效")
 
@@ -871,8 +926,14 @@ def download(
     cookies_from_browser: str | None = None,
     cookies_file: Path | None = None,
     cancel_event: CancellationSignal | None = None,
+    on_progress: Callable[[int, int | None], None] | None = None,
 ) -> DownloadResult:
-    """Download best media + extract wav audio into work_dir."""
+    """Download best media + extract wav audio into work_dir.
+
+    ``on_progress`` receives ``(downloaded_bytes, total_bytes_or_none)`` while
+    the fast Range transport runs; the yt-dlp fallback reports no byte progress
+    because its output is streamed opaquely to the console.
+    """
     work_dir.mkdir(parents=True, exist_ok=True)
     info_json = work_dir / "info.json"
     out_tmpl = str(work_dir / "source.%(ext)s")
@@ -896,6 +957,7 @@ def download(
                 work_dir,
                 fast_paths,
                 cancel_event=cancel_event,
+                on_progress=on_progress,
             )
             if subtitle_args:
                 previous_subtitles = _snapshot_source_files(work_dir)

@@ -117,6 +117,28 @@ def local_media_path(source: str) -> Path | None:
     return candidate.resolve() if candidate.is_file() else None
 
 
+def _download_progress_reporter(progress: ProgressCb) -> Callable[[int, int | None], None]:
+    """Throttle fast-transport byte progress into the [1/4] stage window.
+
+    Byte callbacks arrive per 64 KiB chunk; forwarding each one would flood the
+    GUI log and the plugin event stream. Two percent steps keep updates smooth
+    without noticeable overhead.
+    """
+    last_emitted = -1.0
+
+    def report(current: int, total: int | None) -> None:
+        nonlocal last_emitted
+        if total is None or total <= 0:
+            return
+        fraction = max(0.0, min(1.0, current / total))
+        if fraction < 1.0 and fraction - last_emitted < 0.02:
+            return
+        last_emitted = fraction
+        progress(f"  下载中 {fraction:.0%}", 0.05 + fraction * 0.19)
+
+    return report
+
+
 def _preflight(
     url: str,
     max_frames: int,
@@ -1067,6 +1089,7 @@ def _run_impl(
                 metadata=metadata,
                 cookies_from_browser=effective_browser_cookies,
                 cookies_file=cookies_file,
+                on_progress=_download_progress_reporter(progress),
                 **(
                     {"cancel_event": cancel_event}
                     if cancel_event is not None
