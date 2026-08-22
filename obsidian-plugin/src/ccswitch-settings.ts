@@ -349,10 +349,18 @@ export class CcSwitchProviderSettingsView {
     let providers: CcSwitchProvider[];
     try {
       providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
-    } catch {
+    } catch (error) {
+      // Surface the real reason: "database is locked" (another app holds the
+      // file) looks completely different from a wrong path and used to hide
+      // behind the same generic message.
+      const detail = String((error as Error | undefined)?.message ?? error)
+        .slice(0, 200);
+      const hint = /lock|busy/i.test(detail)
+        ? "数据库正被其他应用占用（例如 cc-switch 正在写入），请稍后重试。"
+        : "请检查路径或 Obsidian 版本。";
       parent.createEl("p", {
         cls: "video-memo-provider-error",
-        text: "无法读取数据库。请检查路径或 Obsidian 版本。",
+        text: `无法读取数据库：${detail}。${hint}`,
       });
       return;
     }

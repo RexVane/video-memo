@@ -690,14 +690,34 @@
   }
 }
 
+/* Provider cards stay horizontal at normal settings widths. Obsidian applies
+   its own responsive flex rules to .setting-item, so keep this override after
+   the generic settings breakpoints and opt into stacking only for very narrow
+   provider containers above. */
+.video-memo-provider-view > .setting-item {
+  align-items: center;
+  flex-direction: row;
+}
+
+.video-memo-provider-view > .setting-item .setting-item-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.video-memo-provider-view > .setting-item .setting-item-control {
+  flex: 0 1 300px;
+  min-width: 0;
+  width: min(300px, 100%);
+}
+
 @container (max-width: 420px) {
   .video-memo-provider-view > .setting-item {
     align-items: stretch;
     flex-direction: column;
-    gap: var(--size-4-2);
   }
 
   .video-memo-provider-view > .setting-item .setting-item-control {
+    flex-basis: auto;
     width: 100%;
   }
 }

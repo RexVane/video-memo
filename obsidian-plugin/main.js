@@ -977,7 +977,7 @@ function loadNodeSqlite() {
     );
   }
 }
-function openDatabase(configuredPath) {
+function readProviderRows(configuredPath) {
   const path = resolveCcSwitchDbPath(configuredPath);
   if ((0, import_node_path.extname)(path).toLowerCase() !== ".db") {
     throw new Error("cc-switch \u6570\u636E\u5E93\u8DEF\u5F84\u5FC5\u987B\u6307\u5411 .db \u6587\u4EF6");
@@ -985,88 +985,102 @@ function openDatabase(configuredPath) {
   if (!(0, import_node_fs.existsSync)(path)) {
     throw new Error("\u672A\u627E\u5230 cc-switch \u6570\u636E\u5E93");
   }
-  const { DatabaseSync } = loadNodeSqlite();
-  return {
-    db: new DatabaseSync(path, { readOnly: true, timeout: 15e3 }),
-    path
-  };
-}
-function loadCcSwitchProviders(configuredPath = "") {
-  const { db, path } = openDatabase(configuredPath);
+  let stat = null;
   try {
-    const rows = db.prepare("SELECT * FROM providers").all();
-    const providers = rows.map((row) => {
-      const appType = textValue(row.app_type);
-      const config = extractProviderConfig(
-        textValue(row.settings_config),
-        textValue(row.meta),
-        appType
-      );
-      const baseUrl = tryNormalizeBaseUrl(config.baseUrl);
-      return {
-        id: textValue(row.id),
-        appType,
-        name: textValue(row.name) || textValue(row.id),
-        category: textValue(row.category) || null,
-        websiteUrl: sanitizeUrlForDisplay(textValue(row.website_url)) || null,
-        notes: textValue(row.notes) || null,
-        sortIndex: numberValue(row.sort_index),
-        createdAt: numberValue(row.created_at),
-        isCurrent: Number(row.is_current) === 1,
-        baseUrl: baseUrl || null,
-        model: config.model || null,
-        apiFormat: config.apiFormat,
-        maskedEnv: config.maskedEnv,
-        configParseError: config.parseError,
-        redactedSettingsConfig: safeConfigSummary(config),
-        providerType: textValue(row.provider_type) || null,
-        usable: Boolean(baseUrl && config.apiKey)
-      };
-    });
-    providers.sort((left, right) => {
-      const appTypeOrder = left.appType.localeCompare(right.appType, "en", {
-        sensitivity: "base"
-      });
-      if (appTypeOrder !== 0) return appTypeOrder;
-      const leftIndex = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
-      const rightIndex = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
-      if (leftIndex !== rightIndex) return leftIndex - rightIndex;
-      return left.name.localeCompare(right.name, "zh-CN", {
-        numeric: true,
-        sensitivity: "base"
-      });
-    });
-    return { dbPath: path, providers };
+    const info = (0, import_node_fs.statSync)(path);
+    stat = { mtimeMs: info.mtimeMs, size: info.size };
+  } catch {
+    stat = null;
+  }
+  const cached = providerRowsCache;
+  if (cached && stat && cached.path === path && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return { rows: cached.rows, path };
+  }
+  const { DatabaseSync } = loadNodeSqlite();
+  const db = new DatabaseSync(path, {
+    readOnly: true,
+    timeout: SQLITE_BUSY_TIMEOUT_MS
+  });
+  let rows;
+  try {
+    rows = db.prepare("SELECT * FROM providers").all();
   } finally {
     db.close();
   }
+  if (stat) {
+    providerRowsCache = { path, mtimeMs: stat.mtimeMs, size: stat.size, rows };
+  }
+  return { rows, path };
 }
-function resolveCcSwitchProviderRuntime(options) {
-  const { db } = openDatabase(options.dbPath ?? "");
-  try {
-    const rows = db.prepare("SELECT * FROM providers WHERE app_type = ?").all(options.appType);
-    const row = options.followCurrent ? rows.find((item) => Number(item.is_current) === 1) : rows.find((item) => textValue(item.id) === (options.providerId ?? ""));
-    if (!row) throw new Error("\u672A\u627E\u5230\u6240\u9009\u4F9B\u5E94\u5546");
+function loadCcSwitchProviders(configuredPath = "") {
+  const { rows, path } = readProviderRows(configuredPath);
+  const providers = rows.map((row) => {
     const appType = textValue(row.app_type);
     const config = extractProviderConfig(
       textValue(row.settings_config),
       textValue(row.meta),
       appType
     );
-    const baseUrl = normalizeOpenAiBaseUrl(config.baseUrl);
-    if (!config.apiKey) throw new Error("\u4F9B\u5E94\u5546\u7F3A\u5C11\u53EF\u7528\u7684 API Key");
+    const baseUrl = tryNormalizeBaseUrl(config.baseUrl);
     return {
       id: textValue(row.id),
       appType,
       name: textValue(row.name) || textValue(row.id),
-      baseUrl,
+      category: textValue(row.category) || null,
+      websiteUrl: sanitizeUrlForDisplay(textValue(row.website_url)) || null,
+      notes: textValue(row.notes) || null,
+      sortIndex: numberValue(row.sort_index),
+      createdAt: numberValue(row.created_at),
+      isCurrent: Number(row.is_current) === 1,
+      baseUrl: baseUrl || null,
       model: config.model || null,
       apiFormat: config.apiFormat,
-      apiKey: config.apiKey
+      maskedEnv: config.maskedEnv,
+      configParseError: config.parseError,
+      redactedSettingsConfig: safeConfigSummary(config),
+      providerType: textValue(row.provider_type) || null,
+      usable: Boolean(baseUrl && config.apiKey)
     };
-  } finally {
-    db.close();
-  }
+  });
+  providers.sort((left, right) => {
+    const appTypeOrder = left.appType.localeCompare(right.appType, "en", {
+      sensitivity: "base"
+    });
+    if (appTypeOrder !== 0) return appTypeOrder;
+    const leftIndex = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
+    const rightIndex = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+    return left.name.localeCompare(right.name, "zh-CN", {
+      numeric: true,
+      sensitivity: "base"
+    });
+  });
+  return { dbPath: path, providers };
+}
+function resolveCcSwitchProviderRuntime(options) {
+  const { rows } = readProviderRows(options.dbPath ?? "");
+  const candidates = rows.filter(
+    (item) => textValue(item.app_type) === options.appType
+  );
+  const row = options.followCurrent ? candidates.find((item) => Number(item.is_current) === 1) : candidates.find((item) => textValue(item.id) === (options.providerId ?? ""));
+  if (!row) throw new Error("\u672A\u627E\u5230\u6240\u9009\u4F9B\u5E94\u5546");
+  const appType = textValue(row.app_type);
+  const config = extractProviderConfig(
+    textValue(row.settings_config),
+    textValue(row.meta),
+    appType
+  );
+  const baseUrl = normalizeOpenAiBaseUrl(config.baseUrl);
+  if (!config.apiKey) throw new Error("\u4F9B\u5E94\u5546\u7F3A\u5C11\u53EF\u7528\u7684 API Key");
+  return {
+    id: textValue(row.id),
+    appType,
+    name: textValue(row.name) || textValue(row.id),
+    baseUrl,
+    model: config.model || null,
+    apiFormat: config.apiFormat,
+    apiKey: config.apiKey
+  };
 }
 function normalizeOpenAiBaseUrl(value) {
   const trimmed = value.trim();
@@ -1174,7 +1188,7 @@ async function probeOpenAiCompatibleModel(options) {
     throw requestError();
   }
 }
-var import_node_fs, import_node_os, import_node_path, import_obsidian, BASE_URL_KEYS, MODEL_KEYS, FORMAT_KEYS;
+var import_node_fs, import_node_os, import_node_path, import_obsidian, BASE_URL_KEYS, MODEL_KEYS, FORMAT_KEYS, SQLITE_BUSY_TIMEOUT_MS, providerRowsCache;
 var init_ccswitch = __esm({
   "src/ccswitch.ts"() {
     import_node_fs = require("node:fs");
@@ -1185,6 +1199,8 @@ var init_ccswitch = __esm({
     BASE_URL_KEYS = /* @__PURE__ */ new Set(["baseurl", "apiurl", "endpoint"]);
     MODEL_KEYS = /* @__PURE__ */ new Set(["model", "defaultmodel"]);
     FORMAT_KEYS = /* @__PURE__ */ new Set(["apiformat", "wireapi", "protocol"]);
+    SQLITE_BUSY_TIMEOUT_MS = 1500;
+    providerRowsCache = null;
   }
 });
 
@@ -1728,10 +1744,12 @@ var CcSwitchProviderSettingsView = class {
     let providers;
     try {
       providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
-    } catch {
+    } catch (error) {
+      const detail = String(error?.message ?? error).slice(0, 200);
+      const hint = /lock|busy/i.test(detail) ? "\u6570\u636E\u5E93\u6B63\u88AB\u5176\u4ED6\u5E94\u7528\u5360\u7528\uFF08\u4F8B\u5982 cc-switch \u6B63\u5728\u5199\u5165\uFF09\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002" : "\u8BF7\u68C0\u67E5\u8DEF\u5F84\u6216 Obsidian \u7248\u672C\u3002";
       parent.createEl("p", {
         cls: "video-memo-provider-error",
-        text: "\u65E0\u6CD5\u8BFB\u53D6\u6570\u636E\u5E93\u3002\u8BF7\u68C0\u67E5\u8DEF\u5F84\u6216 Obsidian \u7248\u672C\u3002"
+        text: `\u65E0\u6CD5\u8BFB\u53D6\u6570\u636E\u5E93\uFF1A${detail}\u3002${hint}`
       });
       return;
     }

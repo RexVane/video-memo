@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { extname, join, resolve } from "node:path";
 
@@ -383,8 +383,24 @@ function loadNodeSqlite(): typeof import("node:sqlite") {
   }
 }
 
-function openDatabase(configuredPath: string): {
-  db: import("node:sqlite").DatabaseSync;
+// node:sqlite is fully synchronous: every call runs on the renderer thread. A
+// locked or hot-journal database would otherwise freeze the whole window for
+// the busy timeout, so keep the wait short and cache rows keyed by file
+// identity (path + mtime + size) to avoid re-reading on every re-render of the
+// settings page or the provider badge.
+const SQLITE_BUSY_TIMEOUT_MS = 1_500;
+
+interface ProviderRowsCacheEntry {
+  path: string;
+  mtimeMs: number;
+  size: number;
+  rows: JsonRecord[];
+}
+
+let providerRowsCache: ProviderRowsCacheEntry | null = null;
+
+function readProviderRows(configuredPath: string): {
+  rows: JsonRecord[];
   path: string;
 } {
   const path = resolveCcSwitchDbPath(configuredPath);
@@ -394,64 +410,86 @@ function openDatabase(configuredPath: string): {
   if (!existsSync(path)) {
     throw new Error("未找到 cc-switch 数据库");
   }
+  let stat: { mtimeMs: number; size: number } | null = null;
+  try {
+    const info = statSync(path);
+    stat = { mtimeMs: info.mtimeMs, size: info.size };
+  } catch {
+    stat = null;
+  }
+  const cached = providerRowsCache;
+  if (
+    cached &&
+    stat &&
+    cached.path === path &&
+    cached.mtimeMs === stat.mtimeMs &&
+    cached.size === stat.size
+  ) {
+    return { rows: cached.rows, path };
+  }
   const { DatabaseSync } = loadNodeSqlite();
-  return {
-    db: new DatabaseSync(path, { readOnly: true, timeout: 15_000 }),
-    path,
-  };
+  const db = new DatabaseSync(path, {
+    readOnly: true,
+    timeout: SQLITE_BUSY_TIMEOUT_MS,
+  });
+  let rows: JsonRecord[];
+  try {
+    rows = db.prepare("SELECT * FROM providers").all() as JsonRecord[];
+  } finally {
+    db.close();
+  }
+  if (stat) {
+    providerRowsCache = { path, mtimeMs: stat.mtimeMs, size: stat.size, rows };
+  }
+  return { rows, path };
 }
 
 export function loadCcSwitchProviders(
   configuredPath = "",
 ): CcSwitchProvidersResponse {
-  const { db, path } = openDatabase(configuredPath);
-  try {
-    const rows = db.prepare("SELECT * FROM providers").all() as JsonRecord[];
-    const providers = rows.map((row): CcSwitchProvider => {
-      const appType = textValue(row.app_type);
-      const config = extractProviderConfig(
-        textValue(row.settings_config),
-        textValue(row.meta),
-        appType,
-      );
-      const baseUrl = tryNormalizeBaseUrl(config.baseUrl);
-      return {
-        id: textValue(row.id),
-        appType,
-        name: textValue(row.name) || textValue(row.id),
-        category: textValue(row.category) || null,
-        websiteUrl: sanitizeUrlForDisplay(textValue(row.website_url)) || null,
-        notes: textValue(row.notes) || null,
-        sortIndex: numberValue(row.sort_index),
-        createdAt: numberValue(row.created_at),
-        isCurrent: Number(row.is_current) === 1,
-        baseUrl: baseUrl || null,
-        model: config.model || null,
-        apiFormat: config.apiFormat,
-        maskedEnv: config.maskedEnv,
-        configParseError: config.parseError,
-        redactedSettingsConfig: safeConfigSummary(config),
-        providerType: textValue(row.provider_type) || null,
-        usable: Boolean(baseUrl && config.apiKey),
-      };
+  const { rows, path } = readProviderRows(configuredPath);
+  const providers = rows.map((row): CcSwitchProvider => {
+    const appType = textValue(row.app_type);
+    const config = extractProviderConfig(
+      textValue(row.settings_config),
+      textValue(row.meta),
+      appType,
+    );
+    const baseUrl = tryNormalizeBaseUrl(config.baseUrl);
+    return {
+      id: textValue(row.id),
+      appType,
+      name: textValue(row.name) || textValue(row.id),
+      category: textValue(row.category) || null,
+      websiteUrl: sanitizeUrlForDisplay(textValue(row.website_url)) || null,
+      notes: textValue(row.notes) || null,
+      sortIndex: numberValue(row.sort_index),
+      createdAt: numberValue(row.created_at),
+      isCurrent: Number(row.is_current) === 1,
+      baseUrl: baseUrl || null,
+      model: config.model || null,
+      apiFormat: config.apiFormat,
+      maskedEnv: config.maskedEnv,
+      configParseError: config.parseError,
+      redactedSettingsConfig: safeConfigSummary(config),
+      providerType: textValue(row.provider_type) || null,
+      usable: Boolean(baseUrl && config.apiKey),
+    };
+  });
+  providers.sort((left, right) => {
+    const appTypeOrder = left.appType.localeCompare(right.appType, "en", {
+      sensitivity: "base",
     });
-    providers.sort((left, right) => {
-      const appTypeOrder = left.appType.localeCompare(right.appType, "en", {
-        sensitivity: "base",
-      });
-      if (appTypeOrder !== 0) return appTypeOrder;
-      const leftIndex = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
-      const rightIndex = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
-      if (leftIndex !== rightIndex) return leftIndex - rightIndex;
-      return left.name.localeCompare(right.name, "zh-CN", {
-        numeric: true,
-        sensitivity: "base",
-      });
+    if (appTypeOrder !== 0) return appTypeOrder;
+    const leftIndex = left.sortIndex ?? Number.MAX_SAFE_INTEGER;
+    const rightIndex = right.sortIndex ?? Number.MAX_SAFE_INTEGER;
+    if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+    return left.name.localeCompare(right.name, "zh-CN", {
+      numeric: true,
+      sensitivity: "base",
     });
-    return { dbPath: path, providers };
-  } finally {
-    db.close();
-  }
+  });
+  return { dbPath: path, providers };
 }
 
 export function resolveCcSwitchProviderRuntime(options: {
@@ -460,36 +498,32 @@ export function resolveCcSwitchProviderRuntime(options: {
   followCurrent: boolean;
   providerId?: string;
 }): CcSwitchProviderRuntime {
-  const { db } = openDatabase(options.dbPath ?? "");
-  try {
-    const rows = db
-      .prepare("SELECT * FROM providers WHERE app_type = ?")
-      .all(options.appType) as JsonRecord[];
-    const row = options.followCurrent
-      ? rows.find((item) => Number(item.is_current) === 1)
-      : rows.find((item) => textValue(item.id) === (options.providerId ?? ""));
-    if (!row) throw new Error("未找到所选供应商");
+  const { rows } = readProviderRows(options.dbPath ?? "");
+  const candidates = rows.filter(
+    (item) => textValue(item.app_type) === options.appType,
+  );
+  const row = options.followCurrent
+    ? candidates.find((item) => Number(item.is_current) === 1)
+    : candidates.find((item) => textValue(item.id) === (options.providerId ?? ""));
+  if (!row) throw new Error("未找到所选供应商");
 
-    const appType = textValue(row.app_type);
-    const config = extractProviderConfig(
-      textValue(row.settings_config),
-      textValue(row.meta),
-      appType,
-    );
-    const baseUrl = normalizeOpenAiBaseUrl(config.baseUrl);
-    if (!config.apiKey) throw new Error("供应商缺少可用的 API Key");
-    return {
-      id: textValue(row.id),
-      appType,
-      name: textValue(row.name) || textValue(row.id),
-      baseUrl,
-      model: config.model || null,
-      apiFormat: config.apiFormat,
-      apiKey: config.apiKey,
-    };
-  } finally {
-    db.close();
-  }
+  const appType = textValue(row.app_type);
+  const config = extractProviderConfig(
+    textValue(row.settings_config),
+    textValue(row.meta),
+    appType,
+  );
+  const baseUrl = normalizeOpenAiBaseUrl(config.baseUrl);
+  if (!config.apiKey) throw new Error("供应商缺少可用的 API Key");
+  return {
+    id: textValue(row.id),
+    appType,
+    name: textValue(row.name) || textValue(row.id),
+    baseUrl,
+    model: config.model || null,
+    apiFormat: config.apiFormat,
+    apiKey: config.apiKey,
+  };
 }
 
 export function normalizeOpenAiBaseUrl(value: string): string {
