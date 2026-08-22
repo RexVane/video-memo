@@ -11,6 +11,7 @@ import {
 } from "obsidian";
 
 import { normalizeOpenAiBaseUrl, nodeSqliteSupported, resolveCcSwitchProviderRuntime } from "./ccswitch";
+import { detectProjectCandidates } from "./detect-project";
 import { RunProgressModal, type TaskState } from "./run-progress";
 import {
   activeCustomProvider,
@@ -45,6 +46,7 @@ export default class VideoMemoPlugin extends Plugin {
   private activeProviderSecret = "";
   private taskState: TaskState | null = null;
   private progressModal: RunProgressModal | null = null;
+  private detectionDone = false;
 
   async onload(): Promise<void> {
     const stored = (await this.loadData()) as Partial<VideoMemoSettings> | null;
@@ -70,6 +72,11 @@ export default class VideoMemoPlugin extends Plugin {
           "已切换为自定义供应商；升级到 Obsidian 1.9.10 或更新版本的安装器后可改回 cc-switch。",
         10000,
       );
+    }
+    // Fill in the engine location on first run so a fresh install works without
+    // manual configuration; the installer usually pre-fills it as well.
+    if (!this.settings.projectPath.trim()) {
+      this.autoDetectProjectDirectory(true);
     }
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass("video-memo-status");
@@ -170,6 +177,33 @@ export default class VideoMemoPlugin extends Plugin {
     return existsSync(virtualEnvPython) ? virtualEnvPython : "python";
   }
 
+  /**
+   * Look for a VideoMemo engine checkout on this machine and adopt it.
+   * Returns the adopted path, or "" when nothing unambiguous was found.
+   */
+  autoDetectProjectDirectory(quiet: boolean): string {
+    if (this.settings.projectPath.trim() && this.detectionDone) {
+      return this.settings.projectPath.trim();
+    }
+    this.detectionDone = true;
+    const candidates = detectProjectCandidates();
+    if (candidates.length === 1) {
+      this.settings.projectPath = candidates[0];
+      void this.saveData(this.settings);
+      new Notice(`VideoMemo：已自动识别项目目录 ${candidates[0]}`, 6000);
+      return candidates[0];
+    }
+    if (candidates.length > 1) {
+      new Notice(
+        `VideoMemo：发现多个候选项目目录（${candidates.slice(0, 3).join("、")}${candidates.length > 3 ? " 等" : ""}），请在设置中选择`,
+        8000,
+      );
+    } else if (!quiet) {
+      new Notice("VideoMemo：未找到包含 src/pipeline.py 的 VideoMemo 目录，请手动填写项目目录", 8000);
+    }
+    return "";
+  }
+
   private openPluginSettings(): void {
     const app = this.app as typeof this.app & {
       setting: { open: () => void; openTabById: (id: string) => void };
@@ -213,7 +247,10 @@ export default class VideoMemoPlugin extends Plugin {
       this.openProgressModal();
       return;
     }
-    const projectPath = this.settings.projectPath.trim();
+    let projectPath = this.settings.projectPath.trim();
+    if (!projectPath || !existsSync(join(projectPath, "src", "pipeline.py"))) {
+      projectPath = this.autoDetectProjectDirectory(false);
+    }
     const pipelinePath = join(projectPath, "src", "pipeline.py");
     if (!projectPath || !existsSync(pipelinePath)) {
       new Notice("请先在插件设置中配置 VideoMemo 项目目录");

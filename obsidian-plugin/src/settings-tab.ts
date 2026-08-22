@@ -86,15 +86,24 @@ export class VideoMemoSettingTab extends PluginSettingTab {
     });
     new Setting(settingsEl)
       .setName("项目目录")
-      .setDesc("包含 src/pipeline.py 的 VideoMemo 目录")
+      .setDesc("包含 src/pipeline.py 的 VideoMemo 目录；留空时自动识别")
       .addText((text) =>
         text
-          .setPlaceholder("D:\\AIApp\\video-memo")
+          .setPlaceholder("留空自动识别，或如 D:\\AIApp\\video-memo")
           .setValue(this.plugin.settings.projectPath)
           .onChange(async (value) => {
             this.plugin.settings.projectPath = value.trim();
-            await this.persist();
-            this.display();
+            await this.plugin.saveData(this.plugin.settings);
+          }),
+      )
+      .addExtraButton((button) =>
+        button
+          .setIcon("search")
+          .setTooltip("自动检测项目目录")
+          .onClick(() => {
+            if (this.plugin.autoDetectProjectDirectory(false)) {
+              this.display();
+            }
           }),
       );
     const projectPath = this.plugin.settings.projectPath.trim();

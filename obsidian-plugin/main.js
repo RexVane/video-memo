@@ -1211,11 +1211,95 @@ __export(main_exports, {
 });
 module.exports = __toCommonJS(main_exports);
 var import_node_child_process = require("node:child_process");
-var import_node_fs2 = require("node:fs");
+var import_node_fs3 = require("node:fs");
 var import_node_readline = require("node:readline");
-var import_node_path2 = require("node:path");
+var import_node_path3 = require("node:path");
 var import_obsidian6 = require("obsidian");
 init_ccswitch();
+
+// src/detect-project.ts
+var import_node_fs2 = require("node:fs");
+var import_node_os2 = require("node:os");
+var import_node_path2 = require("node:path");
+var PROJECT_MARKER = (0, import_node_path2.join)("src", "pipeline.py");
+var NAME_RE = /^video[-_ ]?memo$/i;
+var SKIP_ROOT_DIRS = /* @__PURE__ */ new Set([
+  "$recycle.bin",
+  "appdata",
+  "perflogs",
+  "program files",
+  "program files (x86)",
+  "programdata",
+  "system volume information",
+  "users",
+  "windows",
+  "node_modules"
+]);
+var HOME_PARENT_DIRS = [
+  "",
+  "Projects",
+  "projects",
+  "Code",
+  "code",
+  "Dev",
+  "dev",
+  "Repos",
+  "repos",
+  "Work",
+  "work",
+  "workspace",
+  "AIApp",
+  "Documents",
+  "Desktop"
+];
+function isVideoMemoProject(dir) {
+  try {
+    return (0, import_node_fs2.existsSync)((0, import_node_path2.join)(dir, PROJECT_MARKER));
+  } catch {
+    return false;
+  }
+}
+function listDirs(dir) {
+  try {
+    return (0, import_node_fs2.readdirSync)(dir, { withFileTypes: true }).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => (0, import_node_path2.join)(dir, entry.name));
+  } catch {
+    return [];
+  }
+}
+function collectNamed(root, out) {
+  for (const dir of listDirs(root)) {
+    if (NAME_RE.test((0, import_node_path2.basename)(dir)) && isVideoMemoProject(dir) && !out.includes(dir)) {
+      out.push(dir);
+    }
+  }
+}
+function detectProjectCandidates() {
+  const found = [];
+  const roots = [];
+  if (process.platform === "win32") {
+    for (let code = 67; code <= 90; code += 1) {
+      const drive = `${String.fromCharCode(code)}:\\`;
+      if ((0, import_node_fs2.existsSync)(drive)) roots.push(drive);
+    }
+  } else {
+    roots.push("/");
+  }
+  for (const root of roots) {
+    for (const level1 of listDirs(root)) {
+      const name = (0, import_node_path2.basename)(level1).toLowerCase();
+      if (NAME_RE.test((0, import_node_path2.basename)(level1)) && isVideoMemoProject(level1)) {
+        if (!found.includes(level1)) found.push(level1);
+      }
+      if (SKIP_ROOT_DIRS.has(name)) continue;
+      collectNamed(level1, found);
+    }
+  }
+  const home = (0, import_node_os2.homedir)();
+  for (const parent of HOME_PARENT_DIRS) {
+    collectNamed(parent ? (0, import_node_path2.join)(home, parent) : home, found);
+  }
+  return found;
+}
 
 // src/run-progress.ts
 var import_obsidian2 = require("obsidian");
@@ -1926,11 +2010,16 @@ var VideoMemoSettingTab = class extends import_obsidian4.PluginSettingTab {
       cls: "video-memo-settings-section-label",
       text: "\u8FD0\u884C\u73AF\u5883"
     });
-    new import_obsidian4.Setting(settingsEl).setName("\u9879\u76EE\u76EE\u5F55").setDesc("\u5305\u542B src/pipeline.py \u7684 VideoMemo \u76EE\u5F55").addText(
-      (text) => text.setPlaceholder("D:\\AIApp\\video-memo").setValue(this.plugin.settings.projectPath).onChange(async (value) => {
+    new import_obsidian4.Setting(settingsEl).setName("\u9879\u76EE\u76EE\u5F55").setDesc("\u5305\u542B src/pipeline.py \u7684 VideoMemo \u76EE\u5F55\uFF1B\u7559\u7A7A\u65F6\u81EA\u52A8\u8BC6\u522B").addText(
+      (text) => text.setPlaceholder("\u7559\u7A7A\u81EA\u52A8\u8BC6\u522B\uFF0C\u6216\u5982 D:\\AIApp\\video-memo").setValue(this.plugin.settings.projectPath).onChange(async (value) => {
         this.plugin.settings.projectPath = value.trim();
-        await this.persist();
-        this.display();
+        await this.plugin.saveData(this.plugin.settings);
+      })
+    ).addExtraButton(
+      (button) => button.setIcon("search").setTooltip("\u81EA\u52A8\u68C0\u6D4B\u9879\u76EE\u76EE\u5F55").onClick(() => {
+        if (this.plugin.autoDetectProjectDirectory(false)) {
+          this.display();
+        }
       })
     );
     const projectPath = this.plugin.settings.projectPath.trim();
@@ -2180,6 +2269,7 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
   activeProviderSecret = "";
   taskState = null;
   progressModal = null;
+  detectionDone = false;
   async onload() {
     const stored = await this.loadData();
     this.settings = normalizeSettings(stored);
@@ -2196,6 +2286,9 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
         "VideoMemo\uFF1A\u5F53\u524D Obsidian \u8FD0\u884C\u65F6\u4E0D\u652F\u6301 node:sqlite\uFF0C\u65E0\u6CD5\u8BFB\u53D6 cc-switch \u6570\u636E\u5E93\u3002\u5DF2\u5207\u6362\u4E3A\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\uFF1B\u5347\u7EA7\u5230 Obsidian 1.9.10 \u6216\u66F4\u65B0\u7248\u672C\u7684\u5B89\u88C5\u5668\u540E\u53EF\u6539\u56DE cc-switch\u3002",
         1e4
       );
+    }
+    if (!this.settings.projectPath.trim()) {
+      this.autoDetectProjectDirectory(true);
     }
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass("video-memo-status");
@@ -2281,12 +2374,38 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     return adapter.getBasePath();
   }
   resolvePython(projectPath) {
-    const virtualEnvPython = (0, import_node_path2.join)(
+    const virtualEnvPython = (0, import_node_path3.join)(
       projectPath,
       ".venv",
       process.platform === "win32" ? "Scripts/python.exe" : "bin/python"
     );
-    return (0, import_node_fs2.existsSync)(virtualEnvPython) ? virtualEnvPython : "python";
+    return (0, import_node_fs3.existsSync)(virtualEnvPython) ? virtualEnvPython : "python";
+  }
+  /**
+   * Look for a VideoMemo engine checkout on this machine and adopt it.
+   * Returns the adopted path, or "" when nothing unambiguous was found.
+   */
+  autoDetectProjectDirectory(quiet) {
+    if (this.settings.projectPath.trim() && this.detectionDone) {
+      return this.settings.projectPath.trim();
+    }
+    this.detectionDone = true;
+    const candidates = detectProjectCandidates();
+    if (candidates.length === 1) {
+      this.settings.projectPath = candidates[0];
+      void this.saveData(this.settings);
+      new import_obsidian6.Notice(`VideoMemo\uFF1A\u5DF2\u81EA\u52A8\u8BC6\u522B\u9879\u76EE\u76EE\u5F55 ${candidates[0]}`, 6e3);
+      return candidates[0];
+    }
+    if (candidates.length > 1) {
+      new import_obsidian6.Notice(
+        `VideoMemo\uFF1A\u53D1\u73B0\u591A\u4E2A\u5019\u9009\u9879\u76EE\u76EE\u5F55\uFF08${candidates.slice(0, 3).join("\u3001")}${candidates.length > 3 ? " \u7B49" : ""}\uFF09\uFF0C\u8BF7\u5728\u8BBE\u7F6E\u4E2D\u9009\u62E9`,
+        8e3
+      );
+    } else if (!quiet) {
+      new import_obsidian6.Notice("VideoMemo\uFF1A\u672A\u627E\u5230\u5305\u542B src/pipeline.py \u7684 VideoMemo \u76EE\u5F55\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u9879\u76EE\u76EE\u5F55", 8e3);
+    }
+    return "";
   }
   openPluginSettings() {
     const app = this.app;
@@ -2323,9 +2442,12 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
       this.openProgressModal();
       return;
     }
-    const projectPath = this.settings.projectPath.trim();
-    const pipelinePath = (0, import_node_path2.join)(projectPath, "src", "pipeline.py");
-    if (!projectPath || !(0, import_node_fs2.existsSync)(pipelinePath)) {
+    let projectPath = this.settings.projectPath.trim();
+    if (!projectPath || !(0, import_node_fs3.existsSync)((0, import_node_path3.join)(projectPath, "src", "pipeline.py"))) {
+      projectPath = this.autoDetectProjectDirectory(false);
+    }
+    const pipelinePath = (0, import_node_path3.join)(projectPath, "src", "pipeline.py");
+    if (!projectPath || !(0, import_node_fs3.existsSync)(pipelinePath)) {
       new import_obsidian6.Notice("\u8BF7\u5148\u5728\u63D2\u4EF6\u8BBE\u7F6E\u4E2D\u914D\u7F6E VideoMemo \u9879\u76EE\u76EE\u5F55");
       return;
     }
@@ -2467,11 +2589,11 @@ ${message}`, 8e3);
         this.setStatus(`VideoMemo: ${percent}% ${lastLine || "\u5904\u7406\u4E2D"}`);
         this.progressModal?.refresh();
       } else if (event.type === "artifact" && event.kind === "obsidian_note") {
-        if (state && event.path && (0, import_node_path2.isAbsolute)(event.path)) {
-          const absoluteNote = (0, import_node_path2.resolve)(event.path);
-          const absoluteVault = (0, import_node_path2.resolve)(vaultPath);
-          const vaultRelative = (0, import_node_path2.relative)(absoluteVault, absoluteNote);
-          if (vaultRelative && vaultRelative !== ".." && !vaultRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !(0, import_node_path2.isAbsolute)(vaultRelative)) {
+        if (state && event.path && (0, import_node_path3.isAbsolute)(event.path)) {
+          const absoluteNote = (0, import_node_path3.resolve)(event.path);
+          const absoluteVault = (0, import_node_path3.resolve)(vaultPath);
+          const vaultRelative = (0, import_node_path3.relative)(absoluteVault, absoluteNote);
+          if (vaultRelative && vaultRelative !== ".." && !vaultRelative.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !(0, import_node_path3.isAbsolute)(vaultRelative)) {
             state.notePath = (0, import_obsidian6.normalizePath)(vaultRelative);
           }
         }

@@ -163,7 +163,7 @@ The installer places the built files under:
 <your-vault>/.obsidian/plugins/video-memo/
 ```
 
-Enable the plugin and set the directory containing `src/pipeline.py` in its settings. Python is detected from that project's `.venv`, then falls back to `python` on `PATH`. The installer copies the built runtime files (`main.js`, `manifest.json`, and `styles.css`) together with `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; TypeScript source and build configuration remain in this repository.
+Enable the plugin; the project directory containing `src/pipeline.py` is pre-filled by the installer, auto-detected on first load (a shallow scan for a `VideoMemo` folder with `src/pipeline.py`), or set manually in its settings. Python is detected from that project's `.venv`, then falls back to `python` on `PATH`. The installer copies the built runtime files (`main.js`, `manifest.json`, and `styles.css`) together with `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; TypeScript source and build configuration remain in this repository.
 
 Provider settings support a read-only cc-switch database and multiple editable OpenAI-compatible custom providers. Reading the cc-switch database requires a runtime with `node:sqlite` (Obsidian 1.9.10+ with the updated installer); on older runtimes the plugin detects this and falls back to the custom provider source. Each custom provider has a name, API root URL, API key, protocol format, and model, with one active provider at a time. The plugin can discover models through `/models`; "Test connection" fetches the model list and sends a minimal real request to the selected model. Enter a root such as `https://example.com/v1`, not `/chat/completions`, `/responses`, or `/messages`.
 

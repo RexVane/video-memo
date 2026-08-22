@@ -163,7 +163,7 @@ npm.cmd run build
 <your-vault>/.obsidian/plugins/video-memo/
 ```
 
-启用插件后，在设置中填写包含 `src/pipeline.py` 的项目目录。Python 会优先检测该项目的 `.venv`，未找到时回退到 `PATH` 中的 `python`。安装脚本会复制构建后的运行文件（`main.js`、`manifest.json` 和 `styles.css`）以及 `LICENSE`、`NOTICE` 和 `COPYRIGHT.md`；TypeScript 源码与构建配置保留在本仓库。
+启用插件即可：项目目录（包含 `src/pipeline.py`）由安装脚本预填、首次加载时自动识别（浅层扫描含 `src/pipeline.py` 的 `VideoMemo` 文件夹），也可在设置中手动填写。Python 会优先检测该项目的 `.venv`，未找到时回退到 `PATH` 中的 `python`。安装脚本会复制构建后的运行文件（`main.js`、`manifest.json` 和 `styles.css`）以及 `LICENSE`、`NOTICE` 和 `COPYRIGHT.md`；TypeScript 源码与构建配置保留在本仓库。
 
 供应商设置支持只读的 cc-switch 数据库，也支持添加多个可编辑的 OpenAI-compatible 自定义供应商。读取 cc-switch 数据库需要内置 `node:sqlite` 的运行时（Obsidian 1.9.10 或更新版本的安装器）；旧运行时上插件会自动检测并回退到自定义供应商。每个自定义供应商可填写名称、API 根地址、API key、协议格式和模型，并选择一个当前供应商。插件可通过 `/models` 发现模型；“测试连接”会获取模型列表，再向所选模型发送一次最小真实请求。Base URL 应填写 `https://example.com/v1` 这类根地址，不要填写 `/chat/completions`、`/responses` 或 `/messages`。
 
