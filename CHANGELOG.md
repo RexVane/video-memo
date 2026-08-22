@@ -6,6 +6,10 @@
 
 后续修复和发布准备工作将在此记录。
 
+## [0.2.6] - 2026-08-22
+
+- 插件项目目录支持自动识别：安装脚本在首次安装时把仓库路径写入插件配置；插件加载或启动任务时若未配置，会浅层扫描磁盘定位包含 `src/pipeline.py` 的 VideoMemo 文件夹并自动采用（唯一候选时），设置页也提供"自动检测"按钮。发现多个候选时提示手动选择，绝不覆盖已配置的值。
+
 ## [0.2.5] - 2026-08-22
 
 - 将 Obsidian 插件的 `styles.css` 整体回退到 v0.2.2 基线：撤销 v0.2.3 之后加入的供应商行固定 300px 控件宽度、强制横排实验和 720→520px 断点收紧，恢复低宽度下供应商卡片竖排堆叠的既有布局。v0.2.4 的功能修复（数据库读取加固、错误透出、node:sqlite 降级）全部保留。
@@ -60,7 +64,8 @@
 - 增加普通 HTTP 直链的校验型 Range 多连接下载，并在不适用时回退到 yt-dlp。
 - 统一项目品牌为 VideoMemo / video-memo。
 
-[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.5...HEAD
+[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.6...HEAD
+[0.2.6]: https://github.com/RexVane/video-memo/compare/v0.2.5...v0.2.6
 [0.2.5]: https://github.com/RexVane/video-memo/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/RexVane/video-memo/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/RexVane/video-memo/compare/v0.2.2...v0.2.3
