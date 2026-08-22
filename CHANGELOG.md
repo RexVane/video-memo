@@ -6,6 +6,16 @@
 
 后续修复和发布准备工作将在此记录。
 
+## [0.2.3] - 2026-08-22
+
+- 加固快速下载的 SSRF 防护：域名解析出任一私网/环回/链路本地地址即拒绝（此前需全部为私网才拒绝），并把连接固定到已校验的 IP 地址，消除校验与连接两次 DNS 解析之间的 rebinding 窗口。
+- 分离视频/音频流改为并行下载，快速下载的实时字节进度经管线透传到 GUI 与插件（每 2% 节流一次）；yt-dlp 回退路径行为不变。
+- 强杀进程残留的 `.*.segment-*.part` 段文件在下次下载时按过期阈值自动回收，回退清理也会移除。
+- 分章切块改为按 token 估算（CJK 每字约 1 token、其余约 4 字符 1 token），块上限 12→16、目标 4500 token，避免中文转写撑爆 8K 上下文、英文转写请求过载不均。
+- 分章失败不再无差别吞异常：预期 API/网络错误仍生成占位符但会在笔记和进度中带出失败原因；编程错误直接终止本次运行而不是被占位符掩盖。
+- Obsidian 插件在缺少 `node:sqlite` 的运行时（低于 1.9.10 安装器）上自动从 cc-switch 回退到自定义供应商并给出明确提示；设置页与供应商摘要同步显示版本要求。
+- 对齐 Obsidian 插件供应商子页的布局约束，并收紧窄屏响应式断点。
+
 ## [0.2.2] - 2026-08-21
 
 - 修复 Python 3.10 缺少 `BaseException.add_note()` 时恢复错误诊断被静默丢弃的问题。
@@ -41,7 +51,8 @@
 - 增加普通 HTTP 直链的校验型 Range 多连接下载，并在不适用时回退到 yt-dlp。
 - 统一项目品牌为 VideoMemo / video-memo。
 
-[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.2...HEAD
+[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.3...HEAD
+[0.2.3]: https://github.com/RexVane/video-memo/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/RexVane/video-memo/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/RexVane/video-memo/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/RexVane/video-memo/compare/v0.1.0...v0.2.0
