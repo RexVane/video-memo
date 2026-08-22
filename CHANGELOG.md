@@ -6,6 +6,10 @@
 
 后续修复和发布准备工作将在此记录。
 
+## [0.2.5] - 2026-08-22
+
+- 将 Obsidian 插件的 `styles.css` 整体回退到 v0.2.2 基线：撤销 v0.2.3 之后加入的供应商行固定 300px 控件宽度、强制横排实验和 720→520px 断点收紧，恢复低宽度下供应商卡片竖排堆叠的既有布局。v0.2.4 的功能修复（数据库读取加固、错误透出、node:sqlite 降级）全部保留。
+
 ## [0.2.4] - 2026-08-22
 
 - 修复 Obsidian 插件供应商设置页在 cc-switch 数据库被占用时整窗冻结的问题：`node:sqlite` 的同步等待超时从 15 秒降到 1.5 秒，并按"路径 + 修改时间 + 大小"缓存查询结果，设置页重渲染不再反复读库。
@@ -56,7 +60,8 @@
 - 增加普通 HTTP 直链的校验型 Range 多连接下载，并在不适用时回退到 yt-dlp。
 - 统一项目品牌为 VideoMemo / video-memo。
 
-[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.4...HEAD
+[Unreleased]: https://github.com/RexVane/video-memo/compare/v0.2.5...HEAD
+[0.2.5]: https://github.com/RexVane/video-memo/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/RexVane/video-memo/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/RexVane/video-memo/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/RexVane/video-memo/compare/v0.2.1...v0.2.2
