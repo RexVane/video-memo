@@ -100,21 +100,20 @@
   display: none;
 }
 
-@media (max-width: 520px) {
-  .video-memo-settings-tab:not(.video-memo-provider-view)
-    > .setting-item:not(.video-memo-navigation-setting) {
+@media (max-width: 600px) {
+  .video-memo-settings-tab > .setting-item:not(.video-memo-navigation-setting) {
     align-items: stretch;
     flex-direction: column;
     gap: var(--size-4-2);
   }
 
-  .video-memo-settings-tab:not(.video-memo-provider-view)
+  .video-memo-settings-tab
     > .setting-item:not(.video-memo-navigation-setting)
     .setting-item-control {
     width: 100%;
   }
 
-  .video-memo-settings-tab:not(.video-memo-provider-view)
+  .video-memo-settings-tab
     > .setting-item:not(.video-memo-navigation-setting)
     .setting-item-control
     input {
@@ -365,16 +364,11 @@
 
 /* Provider settings */
 .video-memo-provider-view {
-  box-sizing: border-box;
-  display: block;
   min-width: 0;
-  width: 100%;
 }
 
 .video-memo-provider-view > .setting-item {
-  box-sizing: border-box;
   margin-bottom: var(--size-4-3);
-  width: 100%;
 }
 
 .video-memo-provider-header {
@@ -414,16 +408,6 @@
 
 .video-memo-provider-view .setting-item-control {
   min-width: 0;
-}
-
-.video-memo-provider-source .setting-item-control,
-.video-memo-provider-database .setting-item-control,
-.video-memo-provider-app-type .setting-item-control,
-.video-memo-provider-follow-current .setting-item-control,
-.video-memo-provider-fixed-selection .setting-item-control,
-.video-memo-provider-model .setting-item-control {
-  flex: 0 1 300px;
-  width: min(300px, 100%);
 }
 
 .video-memo-provider-view input,
@@ -645,20 +629,18 @@
   padding: 7px 16px;
 }
 
-@media (max-width: 520px) {
+@media (max-width: 720px) {
   .video-memo-settings-tab {
     padding: 20px 16px 40px;
   }
 
-  .video-memo-settings-tab:not(.video-memo-provider-view) > .setting-item {
+  .video-memo-settings-tab > .setting-item {
     align-items: stretch;
     flex-direction: column;
     gap: 10px;
   }
 
-  .video-memo-settings-tab:not(.video-memo-provider-view)
-    > .setting-item
-    .setting-item-control {
+  .video-memo-settings-tab > .setting-item .setting-item-control {
     flex-basis: auto;
     min-width: 0;
     width: 100%;
@@ -674,50 +656,26 @@
   }
 }
 
-@container (max-width: 520px) {
-  .video-memo-settings-tab:not(.video-memo-provider-view) > .setting-item {
+@container (max-width: 720px) {
+  .video-memo-settings-tab > .setting-item {
     align-items: stretch;
     flex-direction: column;
     gap: 10px;
   }
 
-  .video-memo-settings-tab:not(.video-memo-provider-view)
-    > .setting-item
-    .setting-item-control {
+  .video-memo-settings-tab > .setting-item .setting-item-control {
     flex-basis: auto;
     min-width: 0;
     width: 100%;
   }
-}
 
-/* Provider cards stay horizontal at normal settings widths. Obsidian applies
-   its own responsive flex rules to .setting-item, so keep this override after
-   the generic settings breakpoints and opt into stacking only for very narrow
-   provider containers above. */
-.video-memo-provider-view > .setting-item {
-  align-items: center;
-  flex-direction: row;
-}
-
-.video-memo-provider-view > .setting-item .setting-item-info {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.video-memo-provider-view > .setting-item .setting-item-control {
-  flex: 0 1 300px;
-  min-width: 0;
-  width: min(300px, 100%);
-}
-
-@container (max-width: 420px) {
   .video-memo-provider-view > .setting-item {
     align-items: stretch;
     flex-direction: column;
+    gap: var(--size-4-2);
   }
 
   .video-memo-provider-view > .setting-item .setting-item-control {
-    flex-basis: auto;
     width: 100%;
   }
 }
