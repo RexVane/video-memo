@@ -55,6 +55,9 @@ jobs:
       - name: TypeScript check
         working-directory: obsidian-plugin
         run: npm run check
+      - name: Run plugin tests
+        working-directory: obsidian-plugin
+        run: npm test
       - name: Build plugin
         working-directory: obsidian-plugin
         run: npm run build

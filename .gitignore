@@ -9,7 +9,28 @@ output/
 models/faster-whisper/
 node_modules/
 .zcode/
+obsidian-plugin/test-dist/
 build/
 dist/
 *.egg-info/
 .npm-cache/
+
+# Local agent/application state
+.freebuff/
+
+# Obsidian vault metadata and plugin state
+.obsidian/
+**/.obsidian/
+
+# Local provider databases and SQLite sidecars
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Browser cookie exports
+cookies*.txt
+
+# Diagnostic helper that reads a user's local provider database
+obsidian-plugin/tests/diag-real-db.ts

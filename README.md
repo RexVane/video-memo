@@ -165,7 +165,7 @@ The installer places the built files under:
 
 Enable the plugin; the project directory containing `src/pipeline.py` is pre-filled by the installer, auto-detected on first load (a shallow scan for a `VideoMemo` folder with `src/pipeline.py`), or set manually in its settings. Python is detected from that project's `.venv`, then falls back to `python` on `PATH`. The installer copies the built runtime files (`main.js`, `manifest.json`, and `styles.css`) together with `LICENSE`, `NOTICE`, and `COPYRIGHT.md`; TypeScript source and build configuration remain in this repository.
 
-Provider settings support a read-only cc-switch database and multiple editable OpenAI-compatible custom providers. Reading the cc-switch database requires a runtime with `node:sqlite` (Obsidian 1.9.10+ with the updated installer); on older runtimes the plugin detects this and falls back to the custom provider source. Each custom provider has a name, API root URL, API key, protocol format, and model, with one active provider at a time. The plugin can discover models through `/models`; "Test connection" fetches the model list and sends a minimal real request to the selected model. Enter a root such as `https://example.com/v1`, not `/chat/completions`, `/responses`, or `/messages`.
+Provider settings support a read-only cc-switch database and multiple editable OpenAI-compatible custom providers. Reading the cc-switch database requires a runtime with `node:sqlite` (Obsidian 1.9.10+ with the updated installer); on older runtimes the plugin detects this and falls back to the custom provider source. The cc-switch page uses a compact directory layout: source and app-type filters, compact provider rows, and a separate provider detail view. Each custom provider has a name, API root URL, API key, protocol format, and model, with one active provider at a time. For cc-switch providers, the model is selected from a dropdown that always keeps the provider default available; model discovery appends returned IDs, and choosing an override automatically pins that provider. Empty or non-JSON model responses show a status while leaving the default usable. Enter a root such as `https://example.com/v1`, not `/chat/completions`, `/responses`, or `/messages`. See [provider settings](docs/provider-settings.md) for the full flow and data boundaries.
 
 Custom provider API keys are stored in plaintext in the current vault at `.obsidian/plugins/video-memo/data.json`. They are not put in command-line arguments, logs, or output files. Never commit, share, or sync this file to an untrusted device. The custom-provider workflow remains available on older Obsidian/Electron runtimes that lack `node:sqlite`.
 
@@ -192,10 +192,11 @@ python -m ruff check src tests
 cd obsidian-plugin
 npm.cmd ci
 npm.cmd run check
+npm.cmd test
 npm.cmd run build
 ```
 
-GitHub Actions tests Python 3.10-3.13, runs the Python test suite, type-checks the plugin, and verifies the generated bundle. Tag releases build the plugin bundle and a SHA-256 checksum; they do not include `.env`, models, media, vault data, or dependency caches.
+GitHub Actions tests Python 3.10-3.13, runs the Python test suite, type-checks and tests the plugin, and verifies the generated bundle. Tag releases build the plugin bundle and a SHA-256 checksum; they do not include `.env`, models, media, Vault data, local databases, or dependency caches.
 
 ## Security and Contributions
 
@@ -208,6 +209,7 @@ All VideoMemo source code, including the Python engine and `obsidian-plugin/`, i
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Obsidian provider settings](docs/provider-settings.md)
 - [Changelog](CHANGELOG.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)

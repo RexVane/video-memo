@@ -2,6 +2,7 @@ import {
   loadCcSwitchProviders,
   nodeSqliteSupported,
   normalizeApiFormat,
+  resolveEffectiveAppType,
 } from "./ccswitch";
 import type {
   CcSwitchUiSettings,
@@ -159,17 +160,21 @@ export function describeProviderSelection(settings: VideoMemoSettings): string {
   }
   try {
     const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
+    const { appType } = resolveEffectiveAppType(
+      settings.ccSwitchAppType,
+      providers,
+    );
     const provider = settings.ccSwitchFollowCurrent
       ? providers.find(
-          (item) => item.appType === settings.ccSwitchAppType && item.isCurrent,
+          (item) => item.appType === appType && item.isCurrent,
         )
       : providers.find(
           (item) =>
-            item.appType === settings.ccSwitchAppType &&
+            item.appType === appType &&
             item.id === settings.ccSwitchProviderId,
         );
     if (!provider) {
-      return `cc-switch · ${settings.ccSwitchAppType} · 配置需要检查`;
+      return `cc-switch · ${appType} · 配置需要检查`;
     }
     const mode = settings.ccSwitchFollowCurrent ? "跟随全局当前" : "已固定";
     const model = settings.model || provider.model;

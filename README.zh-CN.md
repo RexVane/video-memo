@@ -165,7 +165,7 @@ npm.cmd run build
 
 启用插件即可：项目目录（包含 `src/pipeline.py`）由安装脚本预填、首次加载时自动识别（浅层扫描含 `src/pipeline.py` 的 `VideoMemo` 文件夹），也可在设置中手动填写。Python 会优先检测该项目的 `.venv`，未找到时回退到 `PATH` 中的 `python`。安装脚本会复制构建后的运行文件（`main.js`、`manifest.json` 和 `styles.css`）以及 `LICENSE`、`NOTICE` 和 `COPYRIGHT.md`；TypeScript 源码与构建配置保留在本仓库。
 
-供应商设置支持只读的 cc-switch 数据库，也支持添加多个可编辑的 OpenAI-compatible 自定义供应商。读取 cc-switch 数据库需要内置 `node:sqlite` 的运行时（Obsidian 1.9.10 或更新版本的安装器）；旧运行时上插件会自动检测并回退到自定义供应商。每个自定义供应商可填写名称、API 根地址、API key、协议格式和模型，并选择一个当前供应商。插件可通过 `/models` 发现模型；“测试连接”会获取模型列表，再向所选模型发送一次最小真实请求。Base URL 应填写 `https://example.com/v1` 这类根地址，不要填写 `/chat/completions`、`/responses` 或 `/messages`。
+供应商设置支持只读的 cc-switch 数据库，也支持添加多个可编辑的 OpenAI-compatible 自定义供应商。读取 cc-switch 数据库需要内置 `node:sqlite` 的运行时（Obsidian 1.9.10 或更新版本的安装器）；旧运行时上插件会自动检测并回退到自定义供应商。cc-switch 页面恢复为紧凑目录布局：先选来源和应用类型，再查看紧凑供应商行，最后进入单独的供应商详情页。每个自定义供应商可填写名称、API 根地址、API key、协议格式和模型，并选择一个当前供应商。cc-switch 详情页的模型采用下拉栏，始终保留供应商默认模型；发现模型后追加可选模型，选择覆盖模型会自动固定对应供应商。接口返回空列表、网页或请求失败时会显示状态，但仍保留默认模型可用。Base URL 应填写 `https://example.com/v1` 这类根地址，不要填写 `/chat/completions`、`/responses` 或 `/messages`。完整流程和数据边界见[供应商设置说明](docs/provider-settings.md)。
 
 自定义供应商 API key 会以明文保存在当前 Vault 的 `.obsidian/plugins/video-memo/data.json` 中，不会进入命令行参数、日志或输出文件。不要提交、分享或将该文件同步到不受信任的设备。缺少 `node:sqlite` 的旧版 Obsidian/Electron 仍可使用自定义供应商。
 
@@ -192,10 +192,11 @@ python -m ruff check src tests
 cd obsidian-plugin
 npm.cmd ci
 npm.cmd run check
+npm.cmd test
 npm.cmd run build
 ```
 
-GitHub Actions 会测试 Python 3.10-3.13，运行 Python 测试、检查插件类型并验证构建产物。推送版本 tag 时会构建插件压缩包和 SHA-256 校验文件，不会包含 `.env`、模型、媒体、Vault 数据或依赖缓存。
+GitHub Actions 会测试 Python 3.10-3.13，运行 Python 测试、检查并测试插件类型与交互，再验证构建产物。推送版本 tag 时会构建插件压缩包和 SHA-256 校验文件，不会包含 `.env`、模型、媒体、Vault 数据、本地数据库或依赖缓存。
 
 ## 安全与贡献
 
@@ -208,6 +209,7 @@ VideoMemo 的全部源码（包括 Python 引擎和 `obsidian-plugin/`）均使�
 ## 相关文档
 
 - [架构说明](docs/architecture.md)
+- [供应商设置说明](docs/provider-settings.md)
 - [变更记录](CHANGELOG.md)
 - [贡献指南](CONTRIBUTING.md)
 - [安全政策](SECURITY.md)

@@ -17,6 +17,7 @@ python -m unittest discover -s tests -v
 cd obsidian-plugin
 npm.cmd ci
 npm.cmd run check
+npm.cmd test
 npm.cmd run build
 ```
 
@@ -26,13 +27,16 @@ npm.cmd run build
 - 不提交 `.env`、API key、浏览器 Cookie、媒体、模型权重、`output/` 或 Vault 内容；
 - 修改 TypeScript 或 CSS 后必须重新构建并提交 `obsidian-plugin/main.js`；
 - 新增下载器行为时使用本地 fake HTTP 服务测试，不访问真实视频网站；
+- 插件交互测试必须使用本地 mock，不读取真实 Vault、cc-switch 数据库或供应商接口；
 - 说明测试命令和任何平台限制；
 - 不复制第三方源代码或许可证文本到不相应的目录。
+
+提交前建议运行 `git diff --check`，并检查待提交文件中没有本机路径、密钥、Cookie、数据库、Vault 数据或构建缓存。
 
 ## Pull request 清单
 
 - [ ] 变更范围和兼容性影响已说明；
 - [ ] Python 测试通过；
-- [ ] 插件 `check` 和 `build` 通过（如涉及插件）；
+- [ ] 插件 `check`、`test` 和 `build` 通过（如涉及插件）；
 - [ ] 文档和 CHANGELOG 已更新（如涉及用户行为）；
-- [ ] 没有密钥、Cookie、真实媒体或生成物。
+- [ ] 没有密钥、Cookie、真实媒体、Vault/数据库文件或不应提交的生成物。

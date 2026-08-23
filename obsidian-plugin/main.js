@@ -745,7 +745,8 @@ __export(ccswitch_exports, {
   openAiModelsUrl: () => openAiModelsUrl,
   probeOpenAiCompatibleModel: () => probeOpenAiCompatibleModel,
   resolveCcSwitchDbPath: () => resolveCcSwitchDbPath,
-  resolveCcSwitchProviderRuntime: () => resolveCcSwitchProviderRuntime
+  resolveCcSwitchProviderRuntime: () => resolveCcSwitchProviderRuntime,
+  resolveEffectiveAppType: () => resolveEffectiveAppType
 });
 function asRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -775,20 +776,39 @@ function keyMatches(normalizedKey, acceptedKeys) {
   }
   return acceptedKeys.has("model") && normalizedKey.endsWith("model");
 }
-function findTextByKey(root, acceptedKeys) {
+function findValueByKey(root, matches, resolve3) {
   const record = asRecord(root);
   if (!record) return "";
   for (const [key, value] of Object.entries(record)) {
-    if (keyMatches(normalizeKey(key), acceptedKeys)) {
-      const candidate = textValue(value);
+    if (matches(normalizeKey(key))) {
+      const candidate = resolve3(key, value);
       if (candidate) return candidate;
     }
   }
+  const pairName = textValue(record.name);
+  if (pairName && matches(normalizeKey(pairName))) {
+    const candidate = resolve3(pairName, record.value);
+    if (candidate) return candidate;
+  }
   for (const value of Object.values(record)) {
-    const nested = findTextByKey(value, acceptedKeys);
-    if (nested) return nested;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const nested = findValueByKey(item, matches, resolve3);
+        if (nested) return nested;
+      }
+    } else {
+      const nested = findValueByKey(value, matches, resolve3);
+      if (nested) return nested;
+    }
   }
   return "";
+}
+function findTextByKey(root, acceptedKeys) {
+  return findValueByKey(
+    root,
+    (normalizedKey) => keyMatches(normalizedKey, acceptedKeys),
+    (_name, value) => textValue(value)
+  );
 }
 function isSecretValueKey(key) {
   const normalized = normalizeKey(key);
@@ -804,37 +824,22 @@ function isSecretValueKey(key) {
   ].some((suffix) => normalized.endsWith(suffix));
 }
 function findSecretValue(root) {
-  const record = asRecord(root);
-  if (!record) return "";
-  for (const [key, value] of Object.entries(record)) {
-    if (isSecretValueKey(key)) {
-      const candidate = textValue(value);
-      if (candidate) return candidate;
-    }
-  }
-  for (const value of Object.values(record)) {
-    const nested = findSecretValue(value);
-    if (nested) return nested;
-  }
-  return "";
+  return findValueByKey(
+    root,
+    (normalizedKey) => isSecretValueKey(normalizedKey),
+    (_name, value) => textValue(value)
+  );
 }
 function findEnvironmentSecret(root) {
-  const record = asRecord(root);
-  if (!record) return "";
-  for (const [key, value] of Object.entries(record)) {
-    if (normalizeKey(key).endsWith("envkey")) {
+  return findValueByKey(
+    root,
+    (normalizedKey) => normalizedKey.endsWith("envkey"),
+    (_name, value) => {
       const environmentName = textValue(value);
-      if (environmentName) {
-        const secret = process.env[environmentName]?.trim();
-        if (secret) return secret;
-      }
+      if (!environmentName) return "";
+      return process.env[environmentName]?.trim() ?? "";
     }
-  }
-  for (const value of Object.values(record)) {
-    const nested = findEnvironmentSecret(value);
-    if (nested) return nested;
-  }
-  return "";
+  );
 }
 function parseJsonRecord(value) {
   if (typeof value !== "string") return null;
@@ -941,6 +946,14 @@ function tryNormalizeBaseUrl(value) {
     return "";
   }
 }
+function resolveEffectiveAppType(savedAppType, providers) {
+  const appTypes = [...new Set(providers.map((x) => x.appType))];
+  if (appTypes.includes(savedAppType)) {
+    return { appType: savedAppType, persisted: false };
+  }
+  const fallback = appTypes[0] || savedAppType;
+  return { appType: fallback, persisted: fallback !== savedAppType };
+}
 function normalizeApiFormat(value) {
   if (typeof value !== "string") return "chat_completions";
   const normalized = value.trim().toLowerCase().replaceAll("-", "_");
@@ -977,6 +990,14 @@ function loadNodeSqlite() {
     );
   }
 }
+function fileSignature(filePath) {
+  try {
+    const info = (0, import_node_fs.statSync)(filePath);
+    return { exists: true, mtimeMs: info.mtimeMs, size: info.size };
+  } catch {
+    return { exists: false, mtimeMs: 0, size: 0 };
+  }
+}
 function readProviderRows(configuredPath) {
   const path = resolveCcSwitchDbPath(configuredPath);
   if ((0, import_node_path.extname)(path).toLowerCase() !== ".db") {
@@ -985,15 +1006,11 @@ function readProviderRows(configuredPath) {
   if (!(0, import_node_fs.existsSync)(path)) {
     throw new Error("\u672A\u627E\u5230 cc-switch \u6570\u636E\u5E93");
   }
-  let stat = null;
-  try {
-    const info = (0, import_node_fs.statSync)(path);
-    stat = { mtimeMs: info.mtimeMs, size: info.size };
-  } catch {
-    stat = null;
-  }
+  const dbSig = fileSignature(path);
+  const walSig = fileSignature(`${path}-wal`);
+  const shmSig = fileSignature(`${path}-shm`);
   const cached = providerRowsCache;
-  if (cached && stat && cached.path === path && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) {
+  if (cached && cached.dbSignature.exists === dbSig.exists && cached.dbSignature.mtimeMs === dbSig.mtimeMs && cached.dbSignature.size === dbSig.size && cached.walSignature.exists === walSig.exists && cached.walSignature.mtimeMs === walSig.mtimeMs && cached.walSignature.size === walSig.size && cached.shmSignature.exists === shmSig.exists && cached.shmSignature.mtimeMs === shmSig.mtimeMs && cached.shmSignature.size === shmSig.size) {
     return { rows: cached.rows, path };
   }
   const { DatabaseSync } = loadNodeSqlite();
@@ -1007,9 +1024,7 @@ function readProviderRows(configuredPath) {
   } finally {
     db.close();
   }
-  if (stat) {
-    providerRowsCache = { path, mtimeMs: stat.mtimeMs, size: stat.size, rows };
-  }
+  providerRowsCache = { dbSignature: dbSig, walSignature: walSig, shmSignature: shmSig, rows };
   return { rows, path };
 }
 function loadCcSwitchProviders(configuredPath = "") {
@@ -1143,9 +1158,14 @@ async function fetchOpenAiCompatibleModels(options) {
       throw: false
     });
     if (response.status < 200 || response.status >= 300) throw requestError();
+    const responseText = typeof response.text === "string" ? response.text : "";
+    if (/<!doctype\s+html|<html[\s>]/i.test(responseText))
+      throw new Error("\u4F9B\u5E94\u5546\u8FD4\u56DE\u4E86\u7F51\u9875\u800C\u4E0D\u662F\u6A21\u578B\u5217\u8868\uFF0C\u53EF\u80FD\u5904\u4E8E\u7EF4\u62A4\u72B6\u6001");
     const models = modelIdsFromPayload(response.json);
     return { endpoint, models };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && /返回了网页而不是模型列表/.test(error.message))
+      throw error;
     throw requestError();
   }
 }
@@ -1570,13 +1590,17 @@ function describeProviderSelection(settings) {
   }
   try {
     const providers = loadCcSwitchProviders(settings.ccSwitchDbPath).providers;
+    const { appType } = resolveEffectiveAppType(
+      settings.ccSwitchAppType,
+      providers
+    );
     const provider = settings.ccSwitchFollowCurrent ? providers.find(
-      (item) => item.appType === settings.ccSwitchAppType && item.isCurrent
+      (item) => item.appType === appType && item.isCurrent
     ) : providers.find(
-      (item) => item.appType === settings.ccSwitchAppType && item.id === settings.ccSwitchProviderId
+      (item) => item.appType === appType && item.id === settings.ccSwitchProviderId
     );
     if (!provider) {
-      return `cc-switch \xB7 ${settings.ccSwitchAppType} \xB7 \u914D\u7F6E\u9700\u8981\u68C0\u67E5`;
+      return `cc-switch \xB7 ${appType} \xB7 \u914D\u7F6E\u9700\u8981\u68C0\u67E5`;
     }
     const mode = settings.ccSwitchFollowCurrent ? "\u8DDF\u968F\u5168\u5C40\u5F53\u524D" : "\u5DF2\u56FA\u5B9A";
     const model = settings.model || provider.model;
@@ -1606,6 +1630,41 @@ var displayBaseUrl = (value) => {
     return value ? "\u5DF2\u914D\u7F6E\u5730\u5740" : "\u672A\u8BC6\u522B Base URL";
   }
 };
+function icon(parent, name, className = "") {
+  const element = parent.createSpan({ cls: className });
+  (0, import_obsidian3.setIcon)(element, name);
+  return element;
+}
+function actionButton(parent, options) {
+  const button = parent.createEl("button", {
+    cls: `ccswitch-action${options.primary ? " is-primary" : ""}`,
+    attr: {
+      type: "button",
+      ...options.tooltip ? { "aria-label": options.tooltip } : {}
+    }
+  });
+  icon(button, options.icon, "ccswitch-action-icon");
+  button.createSpan({ text: options.label });
+  button.disabled = options.disabled ?? false;
+  button.addEventListener("click", options.onClick);
+  return button;
+}
+function badge(parent, label, tone) {
+  parent.createSpan({ cls: `ccswitch-badge is-${tone}`, text: label });
+}
+function metadataField(parent, label, value, iconName) {
+  const field = parent.createDiv({ cls: "ccswitch-meta-field" });
+  const labelRow = field.createDiv({ cls: "ccswitch-meta-label" });
+  icon(labelRow, iconName);
+  labelRow.createSpan({ text: label });
+  field.createDiv({
+    cls: `ccswitch-meta-value${value ? "" : " is-empty"}`,
+    text: value || "\u672A\u914D\u7F6E"
+  });
+}
+function providerSubtitle(provider) {
+  return provider.category || provider.model || provider.appType;
+}
 var ProviderEditorModal = class extends import_obsidian3.Modal {
   constructor(app, provider, save) {
     super(app);
@@ -1634,8 +1693,13 @@ var ProviderEditorModal = class extends import_obsidian3.Modal {
       })
     );
     new import_obsidian3.Setting(contentEl).setName("Base URL").addText(
-      (x) => x.setPlaceholder("https://api.example.com").setValue(this.draft.baseUrl).onChange((v) => {
-        this.draft.baseUrl = v.trim();
+      (x) => x.setPlaceholder("https://api.example.com/v1").setValue(this.draft.baseUrl).onChange((v) => {
+        const trimmed = v.trim();
+        try {
+          this.draft.baseUrl = trimmed ? normalizeOpenAiBaseUrl(trimmed) : "";
+        } catch {
+          this.draft.baseUrl = trimmed;
+        }
       })
     );
     new import_obsidian3.Setting(contentEl).setName("\u534F\u8BAE").addDropdown(
@@ -1665,6 +1729,7 @@ var ProviderEditorModal = class extends import_obsidian3.Modal {
     });
     new import_obsidian3.Setting(contentEl).addButton(
       (button) => button.setButtonText("\u53D1\u73B0\u6A21\u578B").onClick(async () => {
+        if (!this.validConnection()) return;
         button.setDisabled(true);
         results.empty();
         try {
@@ -1709,22 +1774,37 @@ var ProviderEditorModal = class extends import_obsidian3.Modal {
       (b) => b.setCta().setButtonText("\u4FDD\u5B58").onClick(async () => {
         if (!this.valid()) return;
         b.setDisabled(true);
-        await this.save({ ...this.draft });
+        const normalized = { ...this.draft };
+        try {
+          normalized.baseUrl = normalizeOpenAiBaseUrl(this.draft.baseUrl);
+        } catch {
+        }
+        await this.save(normalized);
         this.close();
       })
     );
   }
-  valid() {
-    if (!this.draft.name || !this.draft.baseUrl || !this.draft.apiKey || !this.draft.model) {
-      new import_obsidian3.Notice("\u8BF7\u586B\u5199\u540D\u79F0\u3001Base URL\u3001API Key \u548C\u6A21\u578B");
+  /** Validate base URL + API key only (used by Discover Models). */
+  validConnection() {
+    if (!this.draft.baseUrl || !this.draft.apiKey) {
+      new import_obsidian3.Notice("\u8BF7\u586B\u5199 Base URL \u548C API Key");
       return false;
     }
     try {
-      const u = new URL(this.draft.baseUrl);
-      if (u.protocol !== "https:" && u.hostname !== "localhost" && u.hostname !== "127.0.0.1")
-        throw new Error();
+      normalizeOpenAiBaseUrl(this.draft.baseUrl);
     } catch {
-      new import_obsidian3.Notice("Base URL \u5FC5\u987B\u662F HTTPS\uFF0C\u6216\u672C\u673A\u5730\u5740");
+      new import_obsidian3.Notice("\u8BF7\u586B\u5199\u6709\u6548\u7684 API \u6839\u5730\u5740\uFF08\u4E0D\u5305\u542B /chat/completions \u7B49\u8DEF\u5F84\uFF09");
+      return false;
+    }
+    return true;
+  }
+  /** Full validation for save and connection test: also requires model. */
+  valid() {
+    if (!this.draft.name || !this.validConnection()) {
+      return false;
+    }
+    if (!this.draft.model) {
+      new import_obsidian3.Notice("\u8BF7\u586B\u5199\u6A21\u578B\u540D\u79F0");
       return false;
     }
     return true;
@@ -1738,29 +1818,355 @@ var CcSwitchProviderSettingsView = class {
     this.options = options;
   }
   options;
+  selectedAppType = "";
+  selectedProviderId = "";
+  visibleSource = null;
+  discoveredModels = /* @__PURE__ */ new Map();
+  modelDiscoveryStatus = /* @__PURE__ */ new Map();
+  modelLoadingKey = "";
   showProviderList() {
+    this.selectedAppType = "";
+    this.selectedProviderId = "";
+    this.visibleSource = null;
   }
   render(parent) {
     parent.addClass("video-memo-provider-view");
+    void this.renderCustom;
+    void this.renderCcSwitch;
     const settings = this.options.getSettings();
-    new import_obsidian3.Setting(parent).setClass("video-memo-provider-header").setName("\u4F9B\u5E94\u5546\u8BBE\u7F6E").addExtraButton(
-      (b) => b.setIcon("arrow-left").setTooltip("\u8FD4\u56DE").onClick(this.options.onBack)
+    const source = this.visibleSource ?? settings.providerSource;
+    const section = parent.createDiv({ cls: "ccswitch-section" });
+    const back = section.createDiv({ cls: "ccswitch-page-back" });
+    actionButton(back, {
+      label: "\u8FD4\u56DE\u8BBE\u7F6E",
+      icon: "arrow-left",
+      onClick: this.options.onBack
+    });
+    const heading = section.createDiv({ cls: "ccswitch-heading" });
+    const headingCopy = heading.createDiv();
+    headingCopy.createEl("h2", { text: "\u4F9B\u5E94\u5546" });
+    const sourceSwitch = heading.createDiv({
+      cls: "ccswitch-source-switch",
+      attr: { "aria-label": "\u4F9B\u5E94\u5546\u914D\u7F6E\u6765\u6E90" }
+    });
+    this.renderRichSourceButton(
+      sourceSwitch,
+      "cc-switch",
+      "database",
+      "ccswitch",
+      source
     );
-    new import_obsidian3.Setting(parent).setName("\u914D\u7F6E\u6765\u6E90").setClass("video-memo-provider-source").addDropdown(
-      (d) => d.addOptions({
-        ccswitch: "cc-switch \u6570\u636E\u5E93",
-        custom: "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546"
-      }).setValue(settings.providerSource).onChange(async (v) => {
-        await this.options.updateSettings({
-          providerSource: v
-        });
-        this.options.rerender();
-      })
+    this.renderRichSourceButton(
+      sourceSwitch,
+      "\u81EA\u5B9A\u4E49",
+      "sliders-horizontal",
+      "custom",
+      source
     );
-    if (settings.providerSource === "custom")
-      this.renderCustom(parent, settings);
-    else this.renderCcSwitch(parent, settings);
+    if (source === "custom") {
+      this.renderRichCustom(section, settings);
+      return true;
+    }
+    return this.renderRichCcSwitch(section, settings);
+  }
+  renderRichSourceButton(parent, label, iconName, source, visibleSource) {
+    const active = visibleSource === source;
+    const button = parent.createEl("button", {
+      cls: `ccswitch-source-button${active ? " is-active" : ""}`,
+      attr: { type: "button", "aria-pressed": String(active) }
+    });
+    icon(button, iconName);
+    button.createSpan({ text: label });
+    button.addEventListener("click", () => {
+      this.visibleSource = source;
+      this.selectedProviderId = "";
+      void this.options.updateSettings({ providerSource: source }).then(() => this.options.rerender());
+    });
+  }
+  renderRichCcSwitch(parent, settings) {
+    if (!nodeSqliteSupported()) {
+      this.renderRichError(parent, "\u5F53\u524D Obsidian \u8FD0\u884C\u65F6\u4E0D\u652F\u6301 node:sqlite\uFF0C\u8BF7\u5347\u7EA7 Obsidian \u6216\u6539\u7528\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546\u3002");
+      return true;
+    }
+    let response = null;
+    let loadError = "";
+    try {
+      response = loadCcSwitchProviders(settings.ccSwitchDbPath);
+    } catch (error) {
+      const detail = String(error?.message ?? error).slice(0, 200);
+      loadError = /lock|busy/i.test(detail) ? `${detail}\u3002\u6570\u636E\u5E93\u6B63\u88AB\u5176\u4ED6\u5E94\u7528\u5360\u7528\uFF0C\u8BF7\u7A0D\u540E\u91CD\u8BD5\u3002` : detail;
+    }
+    this.renderRichDatabaseCard(parent, response?.dbPath ?? null, loadError, settings);
+    if (!response) {
+      this.renderRichError(parent, loadError || "\u65E0\u6CD5\u8BFB\u53D6 cc-switch \u6570\u636E\u5E93");
+      return true;
+    }
+    const { appType, persisted } = resolveEffectiveAppType(settings.ccSwitchAppType, response.providers);
+    if (persisted) {
+      void this.options.updateSettings({ ccSwitchAppType: appType, ccSwitchProviderId: "", model: "" });
+    }
+    const counts = /* @__PURE__ */ new Map();
+    for (const provider of response.providers)
+      counts.set(provider.appType, (counts.get(provider.appType) ?? 0) + 1);
+    const appTypes = [...counts.keys()].sort((left, right) => {
+      if (left === "codex") return -1;
+      if (right === "codex") return 1;
+      return left.localeCompare(right);
+    });
+    if (!this.selectedAppType || !appTypes.includes(this.selectedAppType)) this.selectedAppType = appType;
+    this.renderRichTypeTabs(parent, appTypes, counts);
+    const visible = response.providers.filter((provider) => provider.appType === this.selectedAppType);
+    parent.createDiv({ cls: "ccswitch-provider-count", text: `\u5171 ${visible.length} \u4E2A\u4F9B\u5E94\u5546` });
+    const selected = visible.find((provider) => provider.id === this.selectedProviderId);
+    if (selected) {
+      this.renderRichProviderDetail(parent, selected, settings);
+      return true;
+    }
+    this.selectedProviderId = "";
+    if (!visible.length) {
+      const empty = parent.createDiv({ cls: "ccswitch-empty" });
+      icon(empty, "package-open");
+      empty.createSpan({ text: "\u8BE5\u7C7B\u578B\u4E0B\u6CA1\u6709\u4F9B\u5E94\u5546" });
+      return true;
+    }
+    const list = parent.createDiv({ cls: "ccswitch-provider-list" });
+    for (const provider of visible) this.renderRichProviderRow(list, provider, settings);
     return true;
+  }
+  renderRichDatabaseCard(parent, connectedPath, loadError, settings) {
+    const card = parent.createDiv({ cls: "ccswitch-database-card" });
+    const top = card.createDiv({ cls: "ccswitch-database-top" });
+    const identity = top.createDiv({ cls: "ccswitch-database-identity" });
+    const tile = identity.createDiv({ cls: "ccswitch-icon-tile" });
+    icon(tile, "database");
+    const copy = identity.createDiv({ cls: "ccswitch-database-copy" });
+    const title = copy.createDiv({ cls: "ccswitch-database-title" });
+    title.createSpan({ text: "cc-switch \u6570\u636E\u5E93" });
+    badge(title, connectedPath ? "\u5DF2\u8FDE\u63A5" : "\u672A\u8FDE\u63A5", connectedPath ? "accent" : "neutral");
+    copy.createDiv({ cls: "ccswitch-database-description", text: "\u53EA\u8BFB\u89E3\u6790\u4F9B\u5E94\u5546\u914D\u7F6E\uFF1B\u5BC6\u94A5\u5DF2\u8131\u654F\uFF0C\u7559\u7A7A\u4F7F\u7528\u9ED8\u8BA4\u8DEF\u5F84\u3002" });
+    const controls = top.createDiv({ cls: "ccswitch-database-controls" });
+    if (settings.ccSwitchDbPath)
+      actionButton(controls, {
+        label: "\u9ED8\u8BA4\u8DEF\u5F84",
+        icon: "undo-2",
+        onClick: () => void this.options.updateSettings({ ccSwitchDbPath: "" }).then(() => this.options.rerender())
+      });
+    actionButton(controls, { label: "\u5237\u65B0", icon: "refresh-cw", onClick: () => this.options.rerender() });
+    const input = card.createEl("input", {
+      cls: "ccswitch-database-input",
+      attr: { type: "text", value: settings.ccSwitchDbPath, placeholder: "\u7559\u7A7A\u4F7F\u7528\u9ED8\u8BA4\u8DEF\u5F84", "aria-label": "cc-switch \u6570\u636E\u5E93\u8DEF\u5F84" }
+    });
+    input.addEventListener(
+      "change",
+      () => void this.options.updateSettings({ ccSwitchDbPath: input.value.trim() }).then(() => this.options.rerender())
+    );
+    card.createEl("code", {
+      cls: "ccswitch-database-path",
+      text: connectedPath ?? (settings.ccSwitchDbPath || defaultCcSwitchDbPath()),
+      attr: { title: loadError || connectedPath || "" }
+    });
+  }
+  renderRichError(parent, message) {
+    const error = parent.createDiv({ cls: "ccswitch-error" });
+    icon(error, "triangle-alert");
+    const copy = error.createDiv();
+    copy.createEl("strong", { text: "\u65E0\u6CD5\u8BFB\u53D6 cc-switch" });
+    copy.createDiv({ text: message });
+  }
+  renderRichTypeTabs(parent, appTypes, counts) {
+    const tabs = parent.createDiv({ cls: "ccswitch-type-tabs" });
+    for (const appType of appTypes) {
+      const button = tabs.createEl("button", {
+        cls: `ccswitch-type-tab${appType === this.selectedAppType ? " is-active" : ""}`,
+        text: `${appType} (${counts.get(appType) ?? 0})`,
+        attr: { type: "button" }
+      });
+      button.addEventListener("click", () => {
+        this.selectedAppType = appType;
+        this.selectedProviderId = "";
+        void this.options.updateSettings({ ccSwitchAppType: appType, ccSwitchProviderId: "", model: "" }).then(() => this.options.rerender());
+      });
+    }
+  }
+  isRichProviderActive(provider, settings) {
+    if (settings.providerSource !== "ccswitch" || settings.ccSwitchAppType !== provider.appType) return false;
+    return settings.ccSwitchFollowCurrent ? provider.isCurrent : provider.id === settings.ccSwitchProviderId;
+  }
+  renderRichProviderRow(parent, provider, settings) {
+    const active = this.isRichProviderActive(provider, settings);
+    const row = parent.createEl("button", {
+      cls: `ccswitch-provider-row${active ? " is-active" : ""}`,
+      attr: { type: "button", "aria-label": `\u67E5\u770B ${provider.name} \u914D\u7F6E` }
+    });
+    const tile = row.createDiv({ cls: "ccswitch-provider-icon" });
+    icon(tile, provider.usable ? "server" : "server-off");
+    const copy = row.createDiv({ cls: "ccswitch-provider-row-copy" });
+    copy.createDiv({ cls: "ccswitch-provider-name", text: provider.name });
+    copy.createDiv({ cls: "ccswitch-provider-subtitle", text: providerSubtitle(provider) });
+    const trailing = row.createDiv({ cls: "ccswitch-provider-trailing" });
+    if (active) badge(trailing, "\u4F7F\u7528\u4E2D", "accent");
+    else if (provider.isCurrent) badge(trailing, "\u5168\u5C40\u5F53\u524D", "neutral");
+    if (!provider.usable) badge(trailing, "\u914D\u7F6E\u7F3A\u5931", "danger");
+    icon(trailing, "chevron-right");
+    row.addEventListener("click", () => {
+      this.selectedProviderId = provider.id;
+      this.options.rerender();
+    });
+  }
+  renderRichProviderDetail(parent, provider, settings) {
+    const navigation = parent.createDiv({ cls: "ccswitch-detail-navigation" });
+    actionButton(navigation, {
+      label: "\u8FD4\u56DE\u4F9B\u5E94\u5546",
+      icon: "arrow-left",
+      onClick: () => {
+        this.selectedProviderId = "";
+        this.options.rerender();
+      }
+    });
+    const navigationCopy = navigation.createDiv({ cls: "ccswitch-detail-navigation-copy" });
+    navigationCopy.createEl("h2", { text: provider.name });
+    navigationCopy.createDiv({ text: `${provider.appType} \u4F9B\u5E94\u5546\u914D\u7F6E` });
+    const detail = parent.createDiv({ cls: "ccswitch-provider-detail" });
+    const hero = detail.createDiv({ cls: "ccswitch-detail-hero" });
+    const heroMain = hero.createDiv({ cls: "ccswitch-detail-main" });
+    const tile = heroMain.createDiv({ cls: "ccswitch-detail-icon" });
+    icon(tile, "boxes");
+    const copy = heroMain.createDiv({ cls: "ccswitch-detail-copy" });
+    const title = copy.createDiv({ cls: "ccswitch-detail-title" });
+    title.createEl("h3", { text: provider.name });
+    if (provider.isCurrent) badge(title, "\u5168\u5C40\u5F53\u524D", "accent");
+    if (!provider.usable) badge(title, "\u914D\u7F6E\u4E0D\u53EF\u7528", "danger");
+    copy.createDiv({ cls: "ccswitch-detail-notes", text: provider.notes || provider.websiteUrl || "\u6765\u81EA cc-switch \u7684\u4F9B\u5E94\u5546\u914D\u7F6E" });
+    const actions = hero.createDiv({ cls: "ccswitch-detail-actions" });
+    const pinned = !settings.ccSwitchFollowCurrent && settings.ccSwitchAppType === provider.appType && settings.ccSwitchProviderId === provider.id;
+    actionButton(actions, {
+      label: pinned ? "\u5DF2\u56FA\u5B9A\u6B64\u4F9B\u5E94\u5546" : "\u56FA\u5B9A\u4F7F\u7528\u6B64\u4F9B\u5E94\u5546",
+      icon: pinned ? "check" : "pin",
+      primary: !pinned,
+      disabled: pinned || !provider.usable,
+      onClick: () => void this.options.updateSettings({ providerSource: "ccswitch", ccSwitchAppType: provider.appType, ccSwitchFollowCurrent: false, ccSwitchProviderId: provider.id, model: "" }).then(() => this.options.rerender())
+    });
+    actionButton(actions, {
+      label: "\u8DDF\u968F\u5168\u5C40\u5F53\u524D",
+      icon: "refresh-cw",
+      disabled: settings.ccSwitchFollowCurrent && settings.ccSwitchAppType === provider.appType,
+      onClick: () => void this.options.updateSettings({ providerSource: "ccswitch", ccSwitchAppType: provider.appType, ccSwitchFollowCurrent: true, ccSwitchProviderId: "", model: "" }).then(() => this.options.rerender())
+    });
+    const active = this.isRichProviderActive(provider, settings);
+    const modelCard = detail.createDiv({ cls: `ccswitch-model-selector${provider.usable ? "" : " is-unavailable"}` });
+    const modelCopy = modelCard.createDiv({ cls: "ccswitch-model-selector-copy" });
+    const modelTitle = modelCopy.createDiv({ cls: "ccswitch-section-title" });
+    icon(modelTitle, "cpu");
+    modelTitle.createSpan({ text: "\u603B\u7ED3\u6A21\u578B" });
+    modelCopy.createDiv({
+      cls: "ccswitch-model-status",
+      text: !provider.usable ? "\u4F9B\u5E94\u5546\u914D\u7F6E\u7F3A\u5931\uFF0C\u65E0\u6CD5\u53D1\u73B0\u6A21\u578B" : active ? provider.model ? `\u5F53\u524D\u4F9B\u5E94\u5546\u9ED8\u8BA4\u6A21\u578B\uFF1A${provider.model}` : "\u5F53\u524D\u4F9B\u5E94\u5546\u672A\u63D0\u4F9B\u9ED8\u8BA4\u6A21\u578B" : "\u9009\u62E9\u6A21\u578B\u540E\u5C06\u81EA\u52A8\u56FA\u5B9A\u6B64\u4F9B\u5E94\u5546"
+    });
+    const modelControls = modelCard.createDiv({ cls: "ccswitch-model-controls" });
+    const modelKey = this.providerModelKey(provider);
+    const discovered = this.discoveredModels.get(modelKey) ?? [];
+    const modelSelect = modelControls.createEl("select", {
+      cls: "ccswitch-model-select",
+      attr: { "aria-label": "\u603B\u7ED3\u6A21\u578B" }
+    });
+    modelSelect.createEl("option", {
+      text: provider.model ? `\u4F7F\u7528\u4F9B\u5E94\u5546\u9ED8\u8BA4\uFF08${provider.model}\uFF09` : "\u4F7F\u7528\u4F9B\u5E94\u5546\u9ED8\u8BA4\u6A21\u578B",
+      attr: { value: "" }
+    });
+    const models = [];
+    for (const model of [provider.model, ...discovered]) {
+      if (model && !models.includes(model)) models.push(model);
+    }
+    if (active && settings.model && !models.includes(settings.model)) models.unshift(settings.model);
+    for (const model of models) {
+      modelSelect.createEl("option", {
+        text: model === settings.model && !discovered.includes(model) ? `\u5F53\u524D\u8986\u76D6\uFF1A${model}` : model,
+        attr: { value: model }
+      });
+    }
+    modelSelect.value = active ? settings.model : "";
+    modelSelect.disabled = !provider.usable;
+    modelSelect.addEventListener(
+      "change",
+      () => void this.options.updateSettings({
+        providerSource: "ccswitch",
+        ccSwitchAppType: provider.appType,
+        ccSwitchFollowCurrent: false,
+        ccSwitchProviderId: provider.id,
+        model: modelSelect.value
+      }).then(() => this.options.rerender())
+    );
+    const loading = this.modelLoadingKey === modelKey;
+    actionButton(modelControls, {
+      label: loading ? "\u53D1\u73B0\u4E2D\u2026" : discovered.length ? "\u5237\u65B0\u6A21\u578B" : "\u53D1\u73B0\u6A21\u578B",
+      icon: "refresh-cw",
+      disabled: !provider.usable || loading,
+      onClick: () => {
+        this.modelLoadingKey = modelKey;
+        this.modelDiscoveryStatus.delete(modelKey);
+        this.options.rerender();
+        void fetchCcSwitchProviderModels({ dbPath: settings.ccSwitchDbPath, appType: provider.appType, providerId: provider.id }).then((response) => {
+          if (!response.models.length) {
+            const message = "\u670D\u52A1\u672A\u8FD4\u56DE\u53EF\u89E3\u6790\u7684\u6A21\u578B\u5217\u8868\uFF0C\u5F53\u524D\u4EC5\u663E\u793A\u4F9B\u5E94\u5546\u9ED8\u8BA4\u6A21\u578B";
+            this.modelDiscoveryStatus.set(modelKey, message);
+            new import_obsidian3.Notice(message);
+            return;
+          }
+          this.discoveredModels.set(modelKey, response.models);
+          this.modelDiscoveryStatus.set(modelKey, `\u5DF2\u53D1\u73B0 ${response.models.length} \u4E2A\u53EF\u9009\u6A21\u578B`);
+        }).catch((error) => {
+          const detail2 = error instanceof Error ? error.message : "\u6A21\u578B\u63A5\u53E3\u8BF7\u6C42\u5931\u8D25";
+          const message = `${detail2}\uFF1B\u5F53\u524D\u4EC5\u663E\u793A\u4F9B\u5E94\u5546\u9ED8\u8BA4\u6A21\u578B`;
+          this.modelDiscoveryStatus.set(modelKey, message);
+          new import_obsidian3.Notice(message);
+        }).finally(() => {
+          if (this.modelLoadingKey === modelKey) this.modelLoadingKey = "";
+          this.options.rerender();
+        });
+      }
+    });
+    const discoveryStatus = this.modelDiscoveryStatus.get(modelKey);
+    if (discoveryStatus)
+      modelCard.createDiv({ cls: "ccswitch-model-discovery-status", text: discoveryStatus });
+    const metadata = detail.createDiv({ cls: "ccswitch-metadata-grid" });
+    metadataField(metadata, "\u5E94\u7528\u7C7B\u578B", provider.appType, "terminal");
+    metadataField(metadata, "Base URL", provider.baseUrl, "link-2");
+    metadataField(metadata, "\u6A21\u578B", provider.model, "cpu");
+    metadataField(metadata, "API Key", provider.usable ? "\u5DF2\u914D\u7F6E" : "\u7F3A\u5931", "key-round");
+  }
+  providerModelKey(provider) {
+    return `${provider.appType}\0${provider.id}`;
+  }
+  renderRichCustom(parent, settings) {
+    const card = parent.createDiv({ cls: "ccswitch-custom-card" });
+    const heading = card.createDiv({ cls: "ccswitch-custom-heading" });
+    const title = heading.createDiv({ cls: "ccswitch-section-title" });
+    icon(title, "sliders-horizontal");
+    title.createSpan({ text: "\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546" });
+    actionButton(heading, { label: "\u6DFB\u52A0\u4F9B\u5E94\u5546", icon: "plus", primary: true, onClick: () => this.openEditor(null) });
+    if (!settings.customProviders.length) {
+      const empty = card.createDiv({ cls: "ccswitch-empty" });
+      icon(empty, "package-open");
+      empty.createSpan({ text: "\u5C1A\u672A\u6DFB\u52A0\u4F9B\u5E94\u5546" });
+      return;
+    }
+    const list = card.createDiv({ cls: "ccswitch-custom-provider-list" });
+    for (const provider of settings.customProviders) {
+      const active = provider.id === settings.activeCustomProviderId;
+      const row = list.createDiv({ cls: "ccswitch-custom-provider-entry" });
+      const copy = row.createDiv({ cls: "ccswitch-custom-provider-entry-copy" });
+      copy.createDiv({ cls: "ccswitch-custom-provider-entry-name", text: provider.name.trim() || "\u672A\u547D\u540D\u4F9B\u5E94\u5546" });
+      copy.createDiv({ cls: "ccswitch-custom-provider-entry-sub", text: `${provider.model || "\u5C1A\u672A\u9009\u62E9\u6A21\u578B"} \xB7 ${displayBaseUrl(provider.baseUrl)} \xB7 ${maskedKey(provider.apiKey)}` });
+      if (active) badge(row, "\u4F7F\u7528\u4E2D", "accent");
+      const actions = row.createDiv({ cls: "ccswitch-custom-provider-entry-actions" });
+      actionButton(actions, { label: active ? "\u4F7F\u7528\u4E2D" : "\u4F7F\u7528", icon: active ? "check" : "play", primary: !active, disabled: active, onClick: () => void this.options.updateSettings({ providerSource: "custom", activeCustomProviderId: provider.id }).then(() => this.options.rerender()) });
+      actionButton(actions, { label: "\u7F16\u8F91", icon: "pencil", onClick: () => this.openEditor(provider) });
+      actionButton(actions, { label: "\u5220\u9664", icon: "trash-2", onClick: () => {
+        const remaining = settings.customProviders.filter((item) => item.id !== provider.id);
+        const activeId = settings.activeCustomProviderId === provider.id ? remaining[0]?.id || "" : settings.activeCustomProviderId;
+        void this.options.updateSettings({ customProviders: remaining, activeCustomProviderId: activeId }).then(() => this.options.rerender());
+      } });
+    }
   }
   renderCustom(parent, settings) {
     new import_obsidian3.Setting(parent).setClass("video-memo-provider-custom-toolbar").setName("\u81EA\u5B9A\u4E49\u4F9B\u5E94\u5546").setDesc("\u5BC6\u94A5\u4EC5\u4EE5\u63A9\u7801\u663E\u793A").addButton(
@@ -1837,8 +2243,18 @@ var CcSwitchProviderSettingsView = class {
       });
       return;
     }
+    const { appType, persisted } = resolveEffectiveAppType(
+      settings.ccSwitchAppType,
+      providers
+    );
+    if (persisted) {
+      void this.options.updateSettings({
+        ccSwitchAppType: appType,
+        ccSwitchProviderId: "",
+        model: ""
+      });
+    }
     const appTypes = [...new Set(providers.map((x) => x.appType))];
-    const appType = appTypes.includes(settings.ccSwitchAppType) ? settings.ccSwitchAppType : appTypes[0] || settings.ccSwitchAppType;
     new import_obsidian3.Setting(parent).setClass("video-memo-provider-app-type").setName("\u5E94\u7528\u7C7B\u578B").addDropdown((d) => {
       for (const v of appTypes) d.addOption(v, v);
       d.setValue(appType).onChange(async (v) => {
@@ -1869,6 +2285,21 @@ var CcSwitchProviderSettingsView = class {
           this.options.rerender();
         });
       });
+    new import_obsidian3.Setting(parent).setClass("video-memo-provider-list-header").setName("\u53EF\u7528\u4F9B\u5E94\u5546").setDesc(
+      `${list.length} \u4E2A ${appType} \u4F9B\u5E94\u5546` + (settings.ccSwitchFollowCurrent ? ` \xB7 \u5168\u5C40\u5F53\u524D\uFF1A${list.find((x) => x.isCurrent)?.name || "\u672A\u8BBE\u7F6E"}` : " \xB7 \u5173\u95ED\u8DDF\u968F\u540E\u53EF\u56FA\u5B9A\u9009\u62E9")
+    );
+    for (const provider of list) {
+      const isSelected = settings.ccSwitchFollowCurrent && provider.isCurrent || !settings.ccSwitchFollowCurrent && provider.id === settings.ccSwitchProviderId;
+      const state = [
+        provider.isCurrent ? "\u5168\u5C40\u5F53\u524D" : "",
+        isSelected ? "\u4EFB\u52A1\u4F7F\u7528" : "",
+        provider.usable ? "\u5DF2\u914D\u7F6E" : "\u914D\u7F6E\u7F3A\u5931"
+      ].filter(Boolean);
+      const providerSetting = new import_obsidian3.Setting(parent).setClass("video-memo-provider-option").setName(provider.name).setDesc(
+        `${state.join(" \xB7 ")} \xB7 ${displayBaseUrl(provider.baseUrl || "")} \xB7 ${provider.model || "\u9ED8\u8BA4\u6A21\u578B"}`
+      );
+      if (isSelected) providerSetting.settingEl.addClass("is-selected");
+    }
     const selected = settings.ccSwitchFollowCurrent ? list.find((x) => x.isCurrent) : list.find((x) => x.id === settings.ccSwitchProviderId);
     if (!selected) {
       parent.createEl("p", {
@@ -2121,15 +2552,15 @@ var TextPromptModal = class extends import_obsidian5.Modal {
         cls: "video-memo-badge-row"
       });
       if (this.providerBadge) {
-        const badge = badgeRow.createDiv({
+        const badge2 = badgeRow.createDiv({
           cls: "video-memo-provider-badge",
           attr: { "aria-label": "\u5F53\u524D\u4EFB\u52A1\u4F7F\u7528\u7684\u4F9B\u5E94\u5546" }
         });
-        const badgeIcon = badge.createSpan({
+        const badgeIcon = badge2.createSpan({
           cls: "video-memo-provider-badge-icon"
         });
         (0, import_obsidian5.setIcon)(badgeIcon, "server");
-        badge.createSpan({
+        badge2.createSpan({
           cls: "video-memo-provider-badge-text",
           text: this.providerBadge
         });
@@ -2179,7 +2610,7 @@ var TextPromptModal = class extends import_obsidian5.Modal {
         cls: "video-memo-mode-switch",
         attr: { "aria-label": "\u8F93\u5165\u7C7B\u578B" }
       });
-      const createModeButton = (label, icon, mode) => {
+      const createModeButton = (label, icon2, mode) => {
         const button = modeSwitch.createEl("button", {
           cls: "video-memo-mode-button",
           attr: { type: "button" }
@@ -2187,7 +2618,7 @@ var TextPromptModal = class extends import_obsidian5.Modal {
         const iconElement = button.createSpan({
           cls: "video-memo-mode-icon"
         });
-        (0, import_obsidian5.setIcon)(iconElement, icon);
+        (0, import_obsidian5.setIcon)(iconElement, icon2);
         button.createSpan({ text: label });
         button.addEventListener("click", () => setSourceMode(mode));
         return button;
@@ -2465,9 +2896,27 @@ var VideoMemoPlugin = class extends import_obsidian6.Plugin {
     this.activeProviderSecret = "";
     try {
       if (this.settings.providerSource === "ccswitch") {
+        let effectiveAppType = this.settings.ccSwitchAppType;
+        if (nodeSqliteSupported()) {
+          try {
+            const providers = loadCcSwitchProviders(this.settings.ccSwitchDbPath).providers;
+            const { appType, persisted } = resolveEffectiveAppType(
+              this.settings.ccSwitchAppType,
+              providers
+            );
+            effectiveAppType = appType;
+            if (persisted) {
+              this.settings.ccSwitchAppType = appType;
+              this.settings.ccSwitchProviderId = "";
+              this.settings.model = "";
+              void this.saveData(this.settings);
+            }
+          } catch {
+          }
+        }
         const runtime = resolveCcSwitchProviderRuntime({
           dbPath: this.settings.ccSwitchDbPath,
-          appType: this.settings.ccSwitchAppType,
+          appType: effectiveAppType,
           followCurrent: this.settings.ccSwitchFollowCurrent,
           providerId: this.settings.ccSwitchProviderId
         });

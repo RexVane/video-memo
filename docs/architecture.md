@@ -63,3 +63,29 @@ keys are injected into the Python child process environment and are never placed
 in command-line arguments, logs, or output files. `.env`, browser cookies,
 downloaded media, Whisper weights, generated output, and Vault content are local
 data and must not enter Git history or CI artifacts.
+
+## Obsidian provider settings
+
+The provider page is a directory over two configuration sources rather than a
+single editable form:
+
+1. The cc-switch source reads a SQLite database through `node:sqlite` and keeps
+   the database read-only. It groups providers by application type, displays a
+   compact row for each provider, and opens a separate detail view for metadata,
+   current-provider behavior, and model selection.
+2. The custom source stores an editable provider list in the current Vault's
+   plugin data. It supports Chat Completions, Responses, and Anthropic Messages
+   wire formats and keeps only the selected provider active for a run.
+
+For a cc-switch provider, the model selector starts with the provider's default
+model. A user-triggered `/models` request can add session-only model options;
+selecting an override pins the matching provider at the same time. Discovery is
+best-effort: empty, HTML, unsupported, or failed responses become visible
+status text and do not remove the default model. This keeps provider selection
+and model selection from drifting apart while avoiding writes to the source
+database.
+
+The plugin test suite exercises this UI with local Obsidian/Electron mocks and
+`jsdom`. It does not access a real Vault, provider database, API key, or network
+endpoint. See [provider-settings.md](provider-settings.md) for the operational
+flow and security boundary.

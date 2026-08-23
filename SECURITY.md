@@ -19,6 +19,7 @@
   Chat/Responses 发送到 `/chat/completions` 或 `/responses`，Anthropic 发送到 `/v1/messages`；
 - 下载器会过滤敏感请求头，但用户仍应把 Cookie 和媒体链接视为机密；
 - 本地媒体、转写和 Whisper 模型默认保存在用户机器上；
+- Obsidian Vault 元数据、cc-switch/SQLite 数据库及其 `-wal`/`-shm` 侧车文件、浏览器 Cookie 导出和本地诊断状态均属于本地敏感数据，不得进入 Git 历史或 CI artifact；
 - ffmpeg、yt-dlp、Python 和 Node 运行时应从可信来源安装并及时更新；
 - 不要把真实的视频、字幕、模型权重或 Obsidian Vault 提交到测试夹具。
 

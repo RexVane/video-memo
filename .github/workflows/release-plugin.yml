@@ -25,6 +25,9 @@ jobs:
       - name: Check plugin
         working-directory: obsidian-plugin
         run: npm run check
+      - name: Test plugin
+        working-directory: obsidian-plugin
+        run: npm test
       - name: Build plugin
         working-directory: obsidian-plugin
         run: npm run build

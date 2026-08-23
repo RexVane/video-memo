@@ -121,20 +121,51 @@ function keyMatches(normalizedKey: string, acceptedKeys: ReadonlySet<string>): b
   return acceptedKeys.has("model") && normalizedKey.endsWith("model");
 }
 
-function findTextByKey(root: unknown, acceptedKeys: ReadonlySet<string>): string {
+/**
+ * Depth-first walk over a settings blob, visiting every nested record
+ * (including records inside arrays) and claude-code style `{ name, value }`
+ * entries. Returns the first non-empty result from `resolve` for a key that
+ * satisfies `matches`. Plain key/value pairs use the key itself; entries with
+ * a `name`/`value` shape are matched on `name` and resolved from `value`.
+ */
+function findValueByKey(
+  root: unknown,
+  matches: (normalizedKey: string) => boolean,
+  resolve: (name: string, value: unknown) => string,
+): string {
   const record = asRecord(root);
   if (!record) return "";
   for (const [key, value] of Object.entries(record)) {
-    if (keyMatches(normalizeKey(key), acceptedKeys)) {
-      const candidate = textValue(value);
+    if (matches(normalizeKey(key))) {
+      const candidate = resolve(key, value);
       if (candidate) return candidate;
     }
   }
+  const pairName = textValue(record.name);
+  if (pairName && matches(normalizeKey(pairName))) {
+    const candidate = resolve(pairName, record.value);
+    if (candidate) return candidate;
+  }
   for (const value of Object.values(record)) {
-    const nested = findTextByKey(value, acceptedKeys);
-    if (nested) return nested;
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const nested = findValueByKey(item, matches, resolve);
+        if (nested) return nested;
+      }
+    } else {
+      const nested = findValueByKey(value, matches, resolve);
+      if (nested) return nested;
+    }
   }
   return "";
+}
+
+function findTextByKey(root: unknown, acceptedKeys: ReadonlySet<string>): string {
+  return findValueByKey(
+    root,
+    (normalizedKey) => keyMatches(normalizedKey, acceptedKeys),
+    (_name, value) => textValue(value),
+  );
 }
 
 function isSecretValueKey(key: string): boolean {
@@ -152,38 +183,23 @@ function isSecretValueKey(key: string): boolean {
 }
 
 function findSecretValue(root: unknown): string {
-  const record = asRecord(root);
-  if (!record) return "";
-  for (const [key, value] of Object.entries(record)) {
-    if (isSecretValueKey(key)) {
-      const candidate = textValue(value);
-      if (candidate) return candidate;
-    }
-  }
-  for (const value of Object.values(record)) {
-    const nested = findSecretValue(value);
-    if (nested) return nested;
-  }
-  return "";
+  return findValueByKey(
+    root,
+    (normalizedKey) => isSecretValueKey(normalizedKey),
+    (_name, value) => textValue(value),
+  );
 }
 
 function findEnvironmentSecret(root: unknown): string {
-  const record = asRecord(root);
-  if (!record) return "";
-  for (const [key, value] of Object.entries(record)) {
-    if (normalizeKey(key).endsWith("envkey")) {
+  return findValueByKey(
+    root,
+    (normalizedKey) => normalizedKey.endsWith("envkey"),
+    (_name, value) => {
       const environmentName = textValue(value);
-      if (environmentName) {
-        const secret = process.env[environmentName]?.trim();
-        if (secret) return secret;
-      }
-    }
-  }
-  for (const value of Object.values(record)) {
-    const nested = findEnvironmentSecret(value);
-    if (nested) return nested;
-  }
-  return "";
+      if (!environmentName) return "";
+      return process.env[environmentName]?.trim() ?? "";
+    },
+  );
 }
 
 function parseJsonRecord(value: unknown): JsonRecord | null {
@@ -331,6 +347,23 @@ function tryNormalizeBaseUrl(value: string): string {
   }
 }
 
+/**
+ * Resolve the effective app type from a saved value and the available providers.
+ * When the saved type is not present in the database, return the first
+ * available type and signal that the caller should persist the change.
+ */
+export function resolveEffectiveAppType(
+  savedAppType: string,
+  providers: CcSwitchProvider[],
+): { appType: string; persisted: boolean } {
+  const appTypes = [...new Set(providers.map((x) => x.appType))];
+  if (appTypes.includes(savedAppType)) {
+    return { appType: savedAppType, persisted: false };
+  }
+  const fallback = appTypes[0] || savedAppType;
+  return { appType: fallback, persisted: fallback !== savedAppType };
+}
+
 export function normalizeApiFormat(value: unknown): OpenAiApiFormat {
   if (typeof value !== "string") return "chat_completions";
   const normalized = value.trim().toLowerCase().replaceAll("-", "_");
@@ -390,14 +423,29 @@ function loadNodeSqlite(): typeof import("node:sqlite") {
 // settings page or the provider badge.
 const SQLITE_BUSY_TIMEOUT_MS = 1_500;
 
-interface ProviderRowsCacheEntry {
-  path: string;
+interface FileSignature {
+  exists: boolean;
   mtimeMs: number;
   size: number;
+}
+
+interface ProviderRowsCacheEntry {
+  dbSignature: FileSignature;
+  walSignature: FileSignature;
+  shmSignature: FileSignature;
   rows: JsonRecord[];
 }
 
 let providerRowsCache: ProviderRowsCacheEntry | null = null;
+
+function fileSignature(filePath: string): FileSignature {
+  try {
+    const info = statSync(filePath);
+    return { exists: true, mtimeMs: info.mtimeMs, size: info.size };
+  } catch {
+    return { exists: false, mtimeMs: 0, size: 0 };
+  }
+}
 
 function readProviderRows(configuredPath: string): {
   rows: JsonRecord[];
@@ -410,20 +458,21 @@ function readProviderRows(configuredPath: string): {
   if (!existsSync(path)) {
     throw new Error("未找到 cc-switch 数据库");
   }
-  let stat: { mtimeMs: number; size: number } | null = null;
-  try {
-    const info = statSync(path);
-    stat = { mtimeMs: info.mtimeMs, size: info.size };
-  } catch {
-    stat = null;
-  }
+  const dbSig = fileSignature(path);
+  const walSig = fileSignature(`${path}-wal`);
+  const shmSig = fileSignature(`${path}-shm`);
   const cached = providerRowsCache;
   if (
     cached &&
-    stat &&
-    cached.path === path &&
-    cached.mtimeMs === stat.mtimeMs &&
-    cached.size === stat.size
+    cached.dbSignature.exists === dbSig.exists &&
+    cached.dbSignature.mtimeMs === dbSig.mtimeMs &&
+    cached.dbSignature.size === dbSig.size &&
+    cached.walSignature.exists === walSig.exists &&
+    cached.walSignature.mtimeMs === walSig.mtimeMs &&
+    cached.walSignature.size === walSig.size &&
+    cached.shmSignature.exists === shmSig.exists &&
+    cached.shmSignature.mtimeMs === shmSig.mtimeMs &&
+    cached.shmSignature.size === shmSig.size
   ) {
     return { rows: cached.rows, path };
   }
@@ -438,9 +487,7 @@ function readProviderRows(configuredPath: string): {
   } finally {
     db.close();
   }
-  if (stat) {
-    providerRowsCache = { path, mtimeMs: stat.mtimeMs, size: stat.size, rows };
-  }
+  providerRowsCache = { dbSignature: dbSig, walSignature: walSig, shmSignature: shmSig, rows };
   return { rows, path };
 }
 
@@ -610,9 +657,14 @@ export async function fetchOpenAiCompatibleModels(
       throw: false,
     });
     if (response.status < 200 || response.status >= 300) throw requestError();
+    const responseText = typeof response.text === "string" ? response.text : "";
+    if (/<!doctype\s+html|<html[\s>]/i.test(responseText))
+      throw new Error("供应商返回了网页而不是模型列表，可能处于维护状态");
     const models = modelIdsFromPayload(response.json);
     return { endpoint, models };
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && /返回了网页而不是模型列表/.test(error.message))
+      throw error;
     throw requestError();
   }
 }

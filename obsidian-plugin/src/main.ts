@@ -10,7 +10,7 @@ import {
   normalizePath,
 } from "obsidian";
 
-import { normalizeOpenAiBaseUrl, nodeSqliteSupported, resolveCcSwitchProviderRuntime } from "./ccswitch";
+import { normalizeOpenAiBaseUrl, nodeSqliteSupported, resolveCcSwitchProviderRuntime, loadCcSwitchProviders, resolveEffectiveAppType } from "./ccswitch";
 import { detectProjectCandidates } from "./detect-project";
 import { RunProgressModal, type TaskState } from "./run-progress";
 import {
@@ -271,9 +271,31 @@ export default class VideoMemoPlugin extends Plugin {
     this.activeProviderSecret = "";
     try {
       if (this.settings.providerSource === "ccswitch") {
+        // Resolve the effective app type: the saved type may be stale if
+        // the cc-switch database changed since settings were last opened.
+        let effectiveAppType = this.settings.ccSwitchAppType;
+        if (nodeSqliteSupported()) {
+          try {
+            const providers = loadCcSwitchProviders(this.settings.ccSwitchDbPath).providers;
+            const { appType, persisted } = resolveEffectiveAppType(
+              this.settings.ccSwitchAppType,
+              providers,
+            );
+            effectiveAppType = appType;
+            if (persisted) {
+              this.settings.ccSwitchAppType = appType;
+              this.settings.ccSwitchProviderId = "";
+              this.settings.model = "";
+              void this.saveData(this.settings);
+            }
+          } catch {
+            // Database read failure: let resolveCcSwitchProviderRuntime
+            // surface the real error below.
+          }
+        }
         const runtime = resolveCcSwitchProviderRuntime({
           dbPath: this.settings.ccSwitchDbPath,
-          appType: this.settings.ccSwitchAppType,
+          appType: effectiveAppType,
           followCurrent: this.settings.ccSwitchFollowCurrent,
           providerId: this.settings.ccSwitchProviderId,
         });
